@@ -1,0 +1,9 @@
+wheel
+setuptools
+build
+accelerate
+datasets
+numpy
+tiktoken
+tqdm
+torch==2.9.1+cu13.0

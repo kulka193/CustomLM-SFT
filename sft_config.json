@@ -1,0 +1,59 @@
+{
+    "model_config": {
+        "vocab_size": 50304,
+        "d_model": 384,
+        "d_ff": 1024,
+        "num_layers": 16,
+        "num_experts": 16,
+        "num_heads": 16,
+        "block_size": 2048,
+        "dropout": 0.1
+    },
+    "training_config": {
+        "batch_size": 8,
+        "gradient_accumulation_steps": 4,
+        "max_iters": 75000,
+        "max_sup_tokens": 100000000,
+        "eval_iters": 100,
+        "log_interval": 2000,
+        "save_interval": 5000,
+        "lr": 5e-6,
+        "min_lr": 1e-7,
+        "warmup_iters": 500,
+        "weight_decay": 0.01,
+        "beta1": 0.95,
+        "beta2": 0.99,
+        "grad_clip": 1.0,
+        "aux_loss_weight": 1e-3
+    },
+    "data_config": {
+        "data_dir": "./sft_data",
+        "max_seq_length": 2048,
+        "prompt_mask_fraction": 0.65,
+        "train_split": 0.98,
+        "val_split": 0.02,
+        "dataset_mix": {
+            "alpaca":                   0,
+            "dolly":                    0,
+            "evol_instruct":            20000,
+            "everyday_conversations":   2200,
+            "gsm8k":                    8000,
+            "code_python":              20000,
+            "orca_math":                10000,
+            "smollm_basics":            700,
+            "smoltalk_10k":             15000
+        },
+        "n_eval_examples_per_dataset": 25,
+        "prompt_template": "alpaca"
+    },
+    "checkpoint_config": {
+        "base_model_path": "./model_ckpt_3_31_26/ckpt_dist_1300000.pt",
+        "output_dir": "./sft_checkpoints",
+        "resume_from": "./sft_checkpoints/sft_ckpt_stage1c_34000.pt"
+    },
+    "distributed_config": {
+        "num_processes": 1,
+        "mixed_precision": "bf16",
+        "find_unused_parameters": false
+    }
+}
