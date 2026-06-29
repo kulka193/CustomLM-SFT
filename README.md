@@ -1,2 +1,78 @@
 # CustomLM-SFT
-A custom generative Language model trained with pure Pytorch. Includes two major phases in training: Pretraining and Supervised FineTuning 
+A custom generative Large Language model trained with pure Pytorch with code tutorial for two major phases in GenAI training: Pretraining and Supervised FineTuning. Our goal here is to remove as much noise as possible from standard implementations you find elsewhere and focus on teh core-training with minimal readable code. 
+
+[Note: `Large` above is subjective but in today's terms its definitely not considered big enough. But as long as we are successfully able to train >150M model that is close to human-level coherence, we should be good :) ]
+
+The underlying model trained was an autoregressive GPT-styled decoder-only model with a mix of Mixture of Experts and Dense Layers. To train a small 100-200M model like outs, the code repository fixed the `n_experts=16` and `top_k=2`and `lb_loss=1e-3` in MoE layers which means during training we only activated 2 best experts per token out of total of 16 with a small 0.1% weightage in load balancing loss in the objective.  
+
+### Installation and Setup
+The code-base was developed and tested on Linux systems with GPU, although you could make config changes and should pretty well on Windows 11 for SFT stage.
+You can start by setting up the python environment and module installations. To run pretraining, PyTorch version should not matter much as long as you have PyTorch2.x
+```bash
+cd CustomLM-SFT
+python3 -m pip install --upgrade pip
+sudo apt install python3-venv
+python3 -m venv venv
+source ./venv/bin/activate
+pip install -r requirements.txt
+#if Torch installation does not work:
+pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+chmod +x hf_exports.sh
+source ./hf_exports.sh
+```
+
+### Pretraining Data Prep
+
+The prep code is loosely based on Karpathy's nanoGPT repo, but watered-down to make it look simplified. Once the the prep sripts complete the run, you end up with `train.bin` and `val.bin` files which carry the logic of encoding the natural language, tokenizing and then saving as one big Bin file. The tokenization stage uses a GPT-2 tokenizer through OpenAI's tiktoken library. Following datasets were tested and used for this pretraining exercise: `bookcorpus`, `OpenWebText`, `fineweb-edu`(Educational content subset of FineWeb dataset) and `RedPajama`(Github, wikipedia and stackexchange)
+Make sure you have atleast 100G Diskspace and a minimum of 128G RAM before venturing into preparation of the pretraining datasets. You could also adjust the `num_workers` according to your HW availability.
+
+### Pretraining
+The objective of pretraining is simply the next token prediction, so we slice 0 to n-1 from the input and 1 to n from the same inputs and train the model with a CE loss objective(+ Load_balancing_loss). There is no "trick" here, the model learns internal representations relating to the language such as avoiding trivial grammatical errors, reproducing syntax, understanding sentence formations etc. We should not expect the model to learn anything other than this, like factuality and accuracy of writing essays on given topics, which lie outside of the distribution learned by the model's weights.
+
+```bash
+python prepare_<dataset_name>.py
+# for OpenWebText, just use:
+python prepare.py
+```
+
+Once the dataset is prepared:
+- Run the `train_moe.ipynb` Notebook
+- Make sure to install the `accelerate` library-> This is the one of only two parts where we rely on HF libraries since it abstracts much of the PT's DDP framework. Our focus here is minimize focus on Distributed computing and rather focus more on the core LLM training   
+- `num_processes` depends on the num of CUDA devices on your system
+- Additional MoE training configurations can be fine-tuned in `moe_config.json` before running teh notebook
+
+### SFT
+In the supervised fine-tuning stage, we essentially perform the following:
+- Prepare the datamix by loading the datasets with QA pairs
+- In each QA pair, the question corresponds to input prompts and answers correspond to the labels
+- For Q's we take full token sequence (i.e., corresponding to the prompt + response + EOT)
+- For A's, we mask out the tokens corresponding to the prompt, and append it to the token_id for response tokens
+- We then train the "shifted token" CE loss objective (+ Load_balancing_loss) on the pretrained model with a low enough lr
+
+To prepare the SFT datamix, you can configure the data mix configurations in `sft_config.json` and then run:
+```bash
+python sft_prepare.py --config sft_config.json
+```
+
+Once the run is complete, you should see the data in: `./sft_data`
+
+Then run the `sft_train.ipynb` similar to the pretraining notebook by adjusting the hyperparams in `training_config` and `checkpoint_config` in sft_config.json. However, keep in mind the chinchilla limit and SFT passes should be much less than this or you could encounter the catastrophic forgetting problem. 
+
+### Inference
+
+For a single prompt, run 
+
+```bash
+python sft_generate_bkp.py ./sft_checkpoints/sft_ckpt_final.pt \\
+      --instruction "Write a small poem about rain." \\
+      --temperature 0.9 --top-p 0.95 --top-k 50 --max-tokens 200
+```
+
+If you want to run it on a validation held-out, you can run:
+
+```bash
+python sft_generate_bkp.py ./sft_checkpoints/sft_ckpt_final.pt \\
+      --eval-source gsm8k --eval-file ./sft_data/val.jsonl \\
+# Optional sampling params that you can use: --temperature 0.8 --top-p 0.95 --top-k 50 --max-tokens 200 --repetition-penalty 1.1      
+```
+
