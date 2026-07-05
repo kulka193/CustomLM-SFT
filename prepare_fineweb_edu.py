@@ -14,7 +14,7 @@ num_proc = 8
 # best number might be different from num_proc above as it also depends on NW speed.
 # it is better than 1 usually though
 num_proc_load_dataset = num_proc
-
+VOL_NAME="/ephemeral"
 enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
@@ -24,7 +24,7 @@ if __name__ == '__main__':
         "sample-10BT",
         split="train",
         num_proc=num_proc_load_dataset,
-        cache_dir="./cache_root",
+        cache_dir=f"{VOL_NAME}/cache_root",
         trust_remote_code=True,
         streaming=False
     )

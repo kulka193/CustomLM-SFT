@@ -11,7 +11,7 @@ class Expert(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(d_model, d_ff),
             nn.GELU(),
-            nn.Linear(d_ff, d_model),
+            nn.Linear( d_ff, d_model),
             nn.Dropout(dropout),
         )
 
@@ -112,9 +112,10 @@ class MultiHeadAttention(nn.Module):
         v = v.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
 
         # Use PyTorch SDPA instead of manual attention implementation for better performance and memory efficiency
+        
         with sdpa_kernel([SDPBackend.FLASH_ATTENTION,
-            SDPBackend.EFFICIENT_ATTENTION,
-            SDPBackend.MATH
+                        SDPBackend.MATH,
+                        SDPBackend.EFFICIENT_ATTENTION
         ], set_priority=True):
         
         #with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True):
