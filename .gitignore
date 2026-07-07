@@ -6,6 +6,8 @@ __pycache__/
 .Python
 *.bin
 venv*
+model_ckpt_*/
+cache*/
 sft_checkpoints/
 sft_data/
 *log*.txt
