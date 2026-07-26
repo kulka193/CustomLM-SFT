@@ -133,11 +133,19 @@ def parse_arguments():
         help='Path to the MoE model config JSON'
     )
 
+    parser.add_argument(
+        '--val-suffix',
+        type=str,
+        default='owt',
+        help='Suffix for val.bin filename (default: "")'
+    )
+
     # Val.bin sampling
     parser.add_argument(
         '--from-val',
         action='store_true',
-        help='Use a random segment from val.bin as the prompt instead of text input'
+        help='Use a random segment from val.bin as the prompt instead of text input\n' \
+        '\t utb2 -> Utltratextbook2;\n\t owt -> OpenWebText;\n\t fweb -> Fineweb;\n\t fmath4 -> finemathplus4'
     )
     parser.add_argument(
         '--data-dir',
@@ -247,18 +255,18 @@ def print_expert_usage(model):
         print(format_expert_percentages(percentages))
 
 
-def get_val_prompt(data_dir, prompt_len, device):
+def get_val_prompt(data_dir, suffix, prompt_len, device):
     """Sample a random segment from val.bin to use as generation seed."""
-    val_path = os.path.join(data_dir, 'val.bin')
+    val_path = os.path.join(data_dir, f'val_{suffix}.bin')
     if not os.path.exists(val_path):
-        raise FileNotFoundError(f"val.bin not found at: '{val_path}'")
+        raise FileNotFoundError(f"val_{suffix}.bin not found at: '{val_path}'")
 
     data = np.memmap(val_path, dtype=np.uint16, mode='r')
 
     max_start = len(data) - prompt_len - 1
     if max_start <= 0:
         raise ValueError(
-            f"val.bin has {len(data)} tokens, too small for prompt_len={prompt_len}"
+            f"val_{suffix}.bin has {len(data)} tokens, too small for prompt_len={prompt_len}"
         )
 
     start_idx = torch.randint(0, max_start, (1,)).item()
@@ -375,7 +383,7 @@ def main():
     # Build input tokens from prompt or val.bin
     if args.from_val:
         print(f"Sampling {args.prompt_len} tokens from val.bin in '{args.data_dir}'...")
-        input_tokens = get_val_prompt(args.data_dir, args.prompt_len, device)
+        input_tokens = get_val_prompt(args.data_dir, args.val_suffix, args.prompt_len, device)
         seed_tokens = replace_token_sequences(input_tokens[0].tolist())
         print(f"[Seed from val.bin]:")
         print(decode(seed_tokens), end="", flush=True)
@@ -385,7 +393,7 @@ def main():
             start_ids, dtype=torch.long, device=device
         )[None, ...]
         print(decode(replace_token_sequences(start_ids)), end="", flush=True)
-
+    print("\n" + "=" * 50 + "\nModel's generated tokens\n" + "=" * 50)
     # Generate tokens
     start_time = time.time()
     token_count = 0

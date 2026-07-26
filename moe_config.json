@@ -6,13 +6,13 @@
     "num_experts": 16,
     "block_size": 2048,
     "batch_size": 4,
-    "max_iters": 400000,
+    "max_iters": 1200000,
     "num_heads": 16,
     "log_interval": 25000,
     "eval_iters": 100,
     "gradient_acc_steps": 8,
-    "lr": 0.0005,
-    "resume_training": false,
-    "load_ckpt": "./model_ckpt_3_31_26/ckpt_dist_800000.pt",
+    "lr": 1e-4,
+    "resume_training": true,
+    "load_ckpt": "./model_ckpt_7_24/ckpt_dist_bf16_800000.pt",
     "ckpt_num": 800000
 }
