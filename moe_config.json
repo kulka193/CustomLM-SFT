@@ -5,14 +5,14 @@
     "num_layers": 16,
     "num_experts": 16,
     "block_size": 2048,
-    "batch_size": 4,
-    "max_iters": 1200000,
+    "batch_size": 8,
+    "max_iters": 1400000,
     "num_heads": 16,
     "log_interval": 25000,
     "eval_iters": 100,
-    "gradient_acc_steps": 8,
+    "gradient_acc_steps": 4,
     "lr": 1e-4,
     "resume_training": true,
-    "load_ckpt": "./model_ckpt_7_24/ckpt_dist_bf16_800000.pt",
-    "ckpt_num": 800000
+    "load_ckpt": "./model_ckpt_8_15_26/ckpt_dist_bf16_1250000.pt",
+    "ckpt_num": 1250000
 }

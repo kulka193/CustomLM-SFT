@@ -1,8 +1,8 @@
 {
     "model_config": {
         "vocab_size": 50304,
-        "d_model": 384,
-        "d_ff": 1024,
+        "d_model": 768,
+        "d_ff": 2048,
         "num_layers": 16,
         "num_experts": 16,
         "num_heads": 16,
@@ -17,7 +17,7 @@
         "eval_iters": 100,
         "log_interval": 2000,
         "save_interval": 5000,
-        "lr": 5e-6,
+        "lr": 1e-6,
         "min_lr": 1e-7,
         "warmup_iters": 500,
         "weight_decay": 0.01,
@@ -33,11 +33,11 @@
         "train_split": 0.98,
         "val_split": 0.02,
         "dataset_mix": {
-            "alpaca":                   0,
-            "dolly":                    0,
+            "alpaca":                   10000,
+            "dolly":                    10000,
             "evol_instruct":            20000,
             "everyday_conversations":   2200,
-            "gsm8k":                    8000,
+            "gsm8k":                    7000,
             "code_python":              20000,
             "orca_math":                10000,
             "smollm_basics":            700,
@@ -47,9 +47,9 @@
         "prompt_template": "alpaca"
     },
     "checkpoint_config": {
-        "base_model_path": "./model_ckpt_3_31_26/ckpt_dist_1300000.pt",
+        "base_model_path": "./model_ckpt_8_15_26/ckpt_dist_bf16_1375000.pt",
         "output_dir": "./sft_checkpoints",
-        "resume_from": "./sft_checkpoints/sft_ckpt_stage1c_34000.pt"
+        "resume_from": null
     },
     "distributed_config": {
         "num_processes": 1,

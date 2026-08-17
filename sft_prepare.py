@@ -57,14 +57,15 @@ def load_alpaca(cache_dir: str) -> list[dict]:
     """tatsu-lab/alpaca  –  52 k single-turn instruction examples."""
     ds = load_dataset("tatsu-lab/alpaca", split="train", cache_dir=cache_dir)
     out = []
+    set_instructions = f"You are a helpful, precise, and honest AI assistant. Analyze the instruction and any provided input context carefully. Deliver a direct, accurate, and completely factual response that fulfills the request without unnecessary filler."
     for ex in ds:
         instruction = ex.get("instruction", "").strip()
         inp         = ex.get("input", "").strip()
         response    = ex.get("output", "").strip()
         if not instruction or not response:
             continue
-        prompt = ALPACA_WITH_INPUT.format(instruction=instruction, input=inp) \
-                 if inp else ALPACA_NO_INPUT.format(instruction=instruction)
+        prompt = ALPACA_WITH_INPUT.format(instruction=f"{instruction}\n{inp}", input=set_instructions)
+                 #if inp else ALPACA_NO_INPUT.format(instruction=instruction)
         out.append({"prompt": prompt, "response": response})
     return out
 
@@ -74,14 +75,15 @@ def load_dolly(cache_dir: str) -> list[dict]:
     ds = load_dataset("databricks/databricks-dolly-15k", split="train",
                       cache_dir=cache_dir)
     out = []
+    set_instructions = f"Below is an instruction that describes a task. When provided with an input text or context, your response must be derived from it. Complete the request appropriately, truthfully, and directly."
     for ex in ds:
         instruction = ex.get("instruction", "").strip()
         context     = ex.get("context", "").strip()
         response    = ex.get("response", "").strip()
         if not instruction or not response:
             continue
-        prompt = ALPACA_WITH_INPUT.format(instruction=instruction, input=context) \
-                 if context else ALPACA_NO_INPUT.format(instruction=instruction)
+        prompt = ALPACA_WITH_INPUT.format(instruction=f"{instruction}\n{context}", input=set_instructions) \
+                 #if context else ALPACA_NO_INPUT.format(instruction=instruction)
         out.append({"prompt": prompt, "response": response})
     return out
 
