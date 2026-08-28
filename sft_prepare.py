@@ -32,25 +32,32 @@ IGNORE_INDEX = -100          # positions masked from loss
 EOT_TOKEN    = None          # resolved at runtime from tiktoken enc.eot_token
 END_TOKEN_STR = "\n### END"
 
-#Alpaca-style prompt templates
-'''
+# Alpaca-style prompt templates with an explicit system/user-input split.
 ALPACA_WITH_INPUT = (
+    "### SYSTEM:\n{system}\n\n"
     "### Instruction:\n{instruction}\n\n"
     "### Input:\n{input}\n\n"
     "### Response:\n"
 )
-'''
-
-ALPACA_WITH_INPUT = (
-    "### SYSTEM:\n{input}\n\n"
-    "### Instruction:\n{instruction}\n\n"
-    "### Response:\n"
-)
 
 ALPACA_NO_INPUT = (
+    "### SYSTEM:\n{system}\n\n"
     "### Instruction:\n{instruction}\n\n"
     "### Response:\n"
 )
+
+
+def build_sft_prompt(system: str, instruction: str, input_text: str = "") -> str:
+    system = system.strip()
+    instruction = instruction.strip()
+    input_text = input_text.strip()
+    if input_text:
+        return ALPACA_WITH_INPUT.format(
+            system=system,
+            instruction=instruction,
+            input=input_text,
+        )
+    return ALPACA_NO_INPUT.format(system=system, instruction=instruction)
 
 
 def load_alpaca(cache_dir: str) -> list[dict]:
@@ -64,8 +71,7 @@ def load_alpaca(cache_dir: str) -> list[dict]:
         response    = ex.get("output", "").strip()
         if not instruction or not response:
             continue
-        prompt = ALPACA_WITH_INPUT.format(instruction=f"{instruction}\n{inp}", input=set_instructions)
-                 #if inp else ALPACA_NO_INPUT.format(instruction=instruction)
+        prompt = build_sft_prompt(set_instructions, instruction, inp)
         out.append({"prompt": prompt, "response": response})
     return out
 
@@ -82,8 +88,7 @@ def load_dolly(cache_dir: str) -> list[dict]:
         response    = ex.get("response", "").strip()
         if not instruction or not response:
             continue
-        prompt = ALPACA_WITH_INPUT.format(instruction=f"{instruction}\n{context}", input=set_instructions) \
-                 #if context else ALPACA_NO_INPUT.format(instruction=instruction)
+        prompt = build_sft_prompt(set_instructions, instruction, context)
         out.append({"prompt": prompt, "response": response})
     return out
 
@@ -117,7 +122,7 @@ def load_evol_instruct(cache_dir: str) -> list[dict]:
         response    = gpt_turn.get("value", "").strip()
         if not instruction or not response:
             continue
-        prompt = ALPACA_WITH_INPUT.format(instruction=instruction, input=set_instructions)
+        prompt = build_sft_prompt(set_instructions, instruction)
         out.append({"prompt": prompt, "response": response})
     return out
 
@@ -148,10 +153,10 @@ def load_everyday_conversations(cache_dir: str) -> list[dict]:
             continue
         else:
             if messages[idx].get("role") == "user":
-                prompt = ALPACA_WITH_INPUT.format(instruction=messages[idx].get("content", ""), input=set_instructions)
+                prompt = build_sft_prompt(set_instructions, messages[idx].get("content", ""))
                 response = messages[idx+1].get("content", "")
             elif messages[idx].get("role") == "assistant":
-                prompt = ALPACA_WITH_INPUT.format(instruction=messages[idx+1].get("content", ""), input=set_instructions)
+                prompt = build_sft_prompt(set_instructions, messages[idx+1].get("content", ""))
                 response = messages[idx+2].get("content", "")
             else:
                 continue
@@ -179,7 +184,7 @@ def load_gsm8k(cache_dir: str) -> list[dict]:
             continue
         # Explicit CoT instruction so the model learns to show its work
         
-        prompt = ALPACA_WITH_INPUT.format(instruction=question, input=set_instructions)
+        prompt = build_sft_prompt(set_instructions, question)
         out.append({"prompt": prompt, "response": answer})
     return out
 
@@ -202,7 +207,7 @@ def load_orca_math(cache_dir: str) -> list[dict]:
         if not question or not answer:
             continue
         # Explicit CoT instruction so the model learns to show its work
-        prompt = ALPACA_WITH_INPUT.format(instruction=question, input=set_instructions)
+        prompt = build_sft_prompt(set_instructions, question)
         out.append({"prompt": prompt, "response": answer})
     return out
     
@@ -224,9 +229,7 @@ def load_code_python(cache_dir: str) -> list[dict]:
         response    = ex.get("input", "").strip() + "\n" + ex.get("output", "").strip()
         if not instruction or not response:
             continue
-        prompt = (
-            ALPACA_WITH_INPUT.format(instruction=instruction, input=set_instructions)
-        )
+        prompt = build_sft_prompt(set_instructions, instruction)
         out.append({"prompt": prompt, "response": response})
     return out
 
@@ -257,9 +260,7 @@ def load_smollm_basics(cache_dir: str) -> list[dict]:
         user_content = p_smol.sub("customLM",  p_hf.sub("unknownuser", user_content))
         asst_content = p_smol.sub("customLM",  p_hf.sub("unknownuser", asst_content))
         
-        prompt = (
-            ALPACA_WITH_INPUT.format(instruction=user_content, input=set_instructions)
-        )
+        prompt = build_sft_prompt(set_instructions, user_content)
         out.append({
             "prompt": prompt,
             "response": asst_content,
@@ -283,12 +284,13 @@ def load_smoltalk_filtered(cache_dir: str) -> list[dict]:
         if messages[0]["role"] == "user" and messages[1]["role"] == "assistant":
             user_content = messages[0]["content"]
             asst_content = messages[1]["content"]
-            prompt = ALPACA_WITH_INPUT.format(instruction=user_content, input=set_instructions) # no input form
+            prompt = build_sft_prompt(set_instructions, user_content)
         elif messages[0]["role"] == "system":
             user_content = messages[1]["content"]
             asst_content = messages[2]["content"]
-            user_content = messages[0]["content"] + "\n" + user_content # system + user content
-            prompt = ALPACA_WITH_INPUT.format(instruction=user_content, input=set_instructions) # with input form
+            system_content = messages[0]["content"].strip()
+            system_prompt = f"{set_instructions}\n\n{system_content}" if system_content else set_instructions
+            prompt = build_sft_prompt(system_prompt, user_content)
         else:
             continue
         out.append({
@@ -331,14 +333,24 @@ def tokenise_and_mask(
     tokens = prompt_tokens + response_tokens + end_tokens + eot
 
     if len(tokens) > max_seq_length:
-        # Hard-truncate: keep as many response tokens as possible
-        # Always preserve at least 1 response token + EOT
-        max_prompt_tokens = int(max_seq_length * prompt_mask_fraction)
-        prompt_tokens     = prompt_tokens[:max_prompt_tokens]
-        # Reserve space for end_tokens + eot
-        remaining         = max_seq_length - len(prompt_tokens) - len(end_tokens) - 1
-        response_tokens   = response_tokens[:remaining]
-        tokens            = prompt_tokens + response_tokens + end_tokens + eot
+        # Hard-truncate while preserving the answer boundary at the end of
+        # the prompt. Keeping the prompt tail is important because it contains
+        # "### Response:\n", which tells the model where generation begins.
+        min_response_tokens = 1
+        fixed_suffix_len = len(end_tokens) + len(eot)
+        max_prompt_budget = max_seq_length - fixed_suffix_len - min_response_tokens
+
+        if max_prompt_budget <= 0:
+            return None
+
+        requested_prompt_budget = int(max_seq_length * prompt_mask_fraction)
+        prompt_budget = min(requested_prompt_budget, max_prompt_budget)
+        prompt_budget = max(prompt_budget, 1)
+
+        prompt_tokens = prompt_tokens[-prompt_budget:]
+        remaining = max_seq_length - len(prompt_tokens) - fixed_suffix_len
+        response_tokens = response_tokens[:remaining]
+        tokens = prompt_tokens + response_tokens + end_tokens + eot
 
     if len(tokens) < 2:
         return None

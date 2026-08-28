@@ -8,8 +8,8 @@ sft_prepare.py used during data preparation.
 Prompt format (mirrors sft_prepare.py exactly)
 -----------------------------------------------
   Without context:
-      Below is an instruction that describes a task. Write a response that
-      appropriately completes the request.
+      ### SYSTEM:
+      <default assistant behavior>
 
       ### Instruction:
       <your instruction>
@@ -17,10 +17,14 @@ Prompt format (mirrors sft_prepare.py exactly)
       ### Response:
 
   With context (--context "..."):
-      <your context>
+      ### SYSTEM:
+      <default assistant behavior>
 
       ### Instruction:
       <your instruction>
+
+      ### Input:
+      <your context>
 
       ### Response:
 
@@ -71,7 +75,7 @@ import warnings
 import torch
 import torch.nn.functional as F
 import tiktoken
-from sft_prepare import ALPACA_NO_INPUT, ALPACA_WITH_INPUT
+from sft_prepare import build_sft_prompt
 from model_moe import MoETransformer
 
 warnings.filterwarnings("ignore")
@@ -80,6 +84,12 @@ warnings.filterwarnings("ignore")
 # The boundary string the model was trained to generate responses after.
 # Used to cleanly slice the response out of the full decoded sequence.
 RESPONSE_BOUNDARY = "### Response:\n"
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful, precise, and honest AI assistant. "
+    "Analyze the instruction and any provided input context carefully. "
+    "Deliver a direct, accurate, and completely factual response that fulfills "
+    "the request without unnecessary filler."
+)
 
 # ── GPT-2 multi-byte UTF-8 token sequence replacements ───────────────────────
 # Inherited from generate_moe.py — keeps curly quotes, dashes, ellipsis clean.
@@ -204,13 +214,11 @@ def build_prompt(instruction: str, context: str = "") -> str:
     ----------
     instruction : str   The user's instruction / question.
     context     : str   Optional additional context / input text.
-                        When non-empty, uses the ALPACA_WITH_INPUT template.
+                        When non-empty, it is written under ### Input.
     """
     instruction = instruction.strip()
     context     = context.strip()
-    if context:
-        return ALPACA_WITH_INPUT.format(instruction=instruction, input=context)
-    return ALPACA_NO_INPUT.format(instruction=instruction)
+    return build_sft_prompt(DEFAULT_SYSTEM_PROMPT, instruction, context)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
