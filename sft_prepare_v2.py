@@ -269,7 +269,7 @@ def prepare(config_path, seed):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--config", default="sft_config_v2.json")
+    p.add_argument("--config", default="sft_config.json")
     p.add_argument("--seed", type=int, default=42)
     a = p.parse_args()
     prepare(a.config, a.seed)

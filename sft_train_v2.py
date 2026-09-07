@@ -10,6 +10,7 @@ from accelerate.utils import DistributedDataParallelKwargs
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
 from model_moe import MoETransformer
 
@@ -43,8 +44,8 @@ class SFTCollator:
     """Causal shift + dynamic RIGHT padding.
 
     Stored:
-      tokens = [prompt..., answer..., EOT]
-      labels = [-100..., answer..., EOT]
+      tokens = [prompt, prompt..., answer..., EOT]
+      labels = [-100,-100..., answer..., EOT]
 
     Model training:
       X = tokens[:-1]
@@ -210,7 +211,8 @@ def main(config_path, seed):
         model.load_state_dict(state["model"], strict=True)
         optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
-        step = int(state.get("iter", 0)); total_sup = int(state.get("supervised_tokens", 0))
+        step = int(state.get("iter", 0))
+        total_sup = int(state.get("supervised_tokens", 0))
     else:
         load_base(model, cc["base_model_path"])
 
@@ -231,9 +233,15 @@ def main(config_path, seed):
     save_every = int(tc.get("save_interval", 5000))
     aux_w = float(tc.get("aux_loss_weight", 1e-3))
     recent_ce = recent_total = 0.0; recent_n = 0
-
+    pbar = tqdm(
+        total=max_iters,
+        initial=step,
+        desc="SFT",
+        unit="step",
+        disable=not accelerator.is_local_main_process,
+    )
     while step < max_iters:
-        for batch in train_loader:  # reshuffles on every new epoch
+        for batch in tqdm(train_loader):  # reshuffles on every new epoch
             with accelerator.accumulate(model):
                 x, y = batch["input_ids"], batch["labels"]
                 logits, aux_loss = model(x)
@@ -243,7 +251,8 @@ def main(config_path, seed):
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), tc["grad_clip"])
-                optimizer.step(); optimizer.zero_grad(set_to_none=True)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
                 if accelerator.sync_gradients:
                     scheduler.step()
 
@@ -256,6 +265,13 @@ def main(config_path, seed):
 
             if accelerator.sync_gradients:
                 step += 1
+                pbar.update(1)
+                pbar.set_postfix(
+                    ce=f"{ce.detach().float().item():.4f}",
+                    loss=f"{loss.detach().float().item():.4f}",
+                    lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                    sup_tokens=f"{total_sup:,}",
+                )
                 if step % log_every == 0:
                     accelerator.print(
                         f"step={step:,} ce={recent_ce/recent_n:.4f} "
@@ -265,23 +281,28 @@ def main(config_path, seed):
                     recent_ce = recent_total = 0.0; recent_n = 0
                     v = evaluate(model, val_loader, accelerator, int(tc.get("eval_iters", 50)))
                     accelerator.print(f"  val_response_ce={v:.4f}, val_ppl={math.exp(min(v,20)):.2f}")
-
+                    pbar.set_postfix(
+                            ce=f"{ce.detach().float().item():.4f}",
+                            val_ce=f"{v:.4f}",
+                            lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                            sup_tokens=f"{total_sup:,}",
+                        )
                 if step % save_every == 0:
                     save_ckpt(accelerator, model, optimizer, scheduler, step, total_sup, cfg,
-                              os.path.join(cc["output_dir"], f"sft_ckpt_{step:07d}.pt"))
+                              os.path.join(cc["output_dir"], f"sft_ckpt_1b_{step:07d}.pt"))
 
                 if step >= max_iters or (max_sup > 0 and total_sup >= max_sup):
                     break
         if step >= max_iters or (max_sup > 0 and total_sup >= max_sup):
             break
-
+    pbar.close()
     save_ckpt(accelerator, model, optimizer, scheduler, step, total_sup, cfg,
-              os.path.join(cc["output_dir"], "sft_ckpt_final.pt"))
+              os.path.join(cc["output_dir"], "sft_ckpt_1b_final.pt"))
     accelerator.print(f"done: steps={step:,}, supervised_tokens={total_sup:,}")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--config", default="sft_config_v2.json")
+    p.add_argument("--config", default="sft_config.json")
     p.add_argument("--seed", type=int, default=42)
     a = p.parse_args(); main(a.config, a.seed)
