@@ -41,7 +41,9 @@
             "code_python":              20000,
             "orca_math":                10000,
             "smollm_basics":            700,
-            "smoltalk_10k":             15000
+            "smoltalk_10k":             15000,
+            "smoltalk_summarize_rewrite":10000,
+            "eli5":                     10000
         },
         "n_eval_examples_per_dataset": 25,
         "prompt_template": "alpaca"
