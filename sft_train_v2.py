@@ -202,20 +202,24 @@ def main(config_path, seed):
     for i in range(min(freeze_n, len(model.blocks))):
         for p in model.blocks[i].parameters(): p.requires_grad = False
 
-    optimizer = build_optimizer(model, tc)
-    scheduler = build_scheduler(optimizer, tc)
     step, total_sup = 0, 0
 
     if cc.get("resume_from"):
         state = torch.load(cc["resume_from"], map_location="cpu", weights_only=True)
         model.load_state_dict(state["model"], strict=True)
         optimizer.load_state_dict(state["optimizer"])
-        scheduler.load_state_dict(state["scheduler"])
+        #scheduler.load_state_dict(state["scheduler"])
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = tc["lr"]
+            param_group["initial_lr"] = tc["lr"]
+        # Build a NEW scheduler AFTER optimizer loading/LR override
+        scheduler = build_scheduler(optimizer, tc)
         step = int(state.get("iter", 0))
         total_sup = int(state.get("supervised_tokens", 0))
     else:
         load_base(model, cc["base_model_path"])
-
+        optimizer = build_optimizer(model, tc)
+        scheduler = build_scheduler(optimizer, tc)
     accelerator.print(
         f"train examples={len(train_ds):,}, val examples={len(val_ds):,}, "
         f"trainable params={sum(p.numel() for p in model.parameters() if p.requires_grad):,}\n"
@@ -241,7 +245,7 @@ def main(config_path, seed):
         disable=not accelerator.is_local_main_process,
     )
     while step < max_iters:
-        for batch in tqdm(train_loader):  # reshuffles on every new epoch
+        for batch in train_loader:  # reshuffles on every new epoch
             with accelerator.accumulate(model):
                 x, y = batch["input_ids"], batch["labels"]
                 logits, aux_loss = model(x)
@@ -265,13 +269,6 @@ def main(config_path, seed):
 
             if accelerator.sync_gradients:
                 step += 1
-                pbar.update(1)
-                pbar.set_postfix(
-                    ce=f"{ce.detach().float().item():.4f}",
-                    loss=f"{loss.detach().float().item():.4f}",
-                    lr=f"{optimizer.param_groups[0]['lr']:.2e}",
-                    sup_tokens=f"{total_sup:,}",
-                )
                 if step % log_every == 0:
                     accelerator.print(
                         f"step={step:,} ce={recent_ce/recent_n:.4f} "
@@ -281,12 +278,6 @@ def main(config_path, seed):
                     recent_ce = recent_total = 0.0; recent_n = 0
                     v = evaluate(model, val_loader, accelerator, int(tc.get("eval_iters", 50)))
                     accelerator.print(f"  val_response_ce={v:.4f}, val_ppl={math.exp(min(v,20)):.2f}")
-                    pbar.set_postfix(
-                            ce=f"{ce.detach().float().item():.4f}",
-                            val_ce=f"{v:.4f}",
-                            lr=f"{optimizer.param_groups[0]['lr']:.2e}",
-                            sup_tokens=f"{total_sup:,}",
-                        )
                 if step % save_every == 0:
                     save_ckpt(accelerator, model, optimizer, scheduler, step, total_sup, cfg,
                               os.path.join(cc["output_dir"], f"sft_ckpt_1b_{step:07d}.pt"))
@@ -295,6 +286,7 @@ def main(config_path, seed):
                     break
         if step >= max_iters or (max_sup > 0 and total_sup >= max_sup):
             break
+        pbar.update(1)
     pbar.close()
     save_ckpt(accelerator, model, optimizer, scheduler, step, total_sup, cfg,
               os.path.join(cc["output_dir"], "sft_ckpt_1b_final.pt"))
