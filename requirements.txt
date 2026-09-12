@@ -1,9 +1,14 @@
+--index-url https://download.pytorch.org/whl/cu130
+--extra-index-url https://pypi.org/simple
+
 wheel
 setuptools
 build
+torch==2.11.0 
+torchvision==0.26.0 
+torchaudio==2.11.0
 accelerate
 datasets
 numpy
 tiktoken
 tqdm
-#torch==2.9.1+cu13.0
