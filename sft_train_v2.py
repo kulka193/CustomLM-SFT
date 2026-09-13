@@ -203,7 +203,7 @@ def main(config_path, seed):
         for p in model.blocks[i].parameters(): p.requires_grad = False
 
     step, total_sup = 0, 0
-
+    optimizer = build_optimizer(model, tc)
     if cc.get("resume_from"):
         state = torch.load(cc["resume_from"], map_location="cpu", weights_only=True)
         model.load_state_dict(state["model"], strict=True)
@@ -223,7 +223,8 @@ def main(config_path, seed):
     accelerator.print(
         f"train examples={len(train_ds):,}, val examples={len(val_ds):,}, "
         f"trainable params={sum(p.numel() for p in model.parameters() if p.requires_grad):,}\n"
-        f"LR={tc['lr']:.2e}, minLR={tc['min_lr']:.2e}, warmup={tc['warmup_iters']}"
+        f"LR={tc['lr']:.2e}, minLR={tc['min_lr']:.2e}, warmup={tc['warmup_iters']}\n"
+        f"resuming from step={step}, last trained total_supervised_tokens={total_sup}"
     )
 
     model, optimizer, train_loader, val_loader = accelerator.prepare(
@@ -280,16 +281,16 @@ def main(config_path, seed):
                     accelerator.print(f"  val_response_ce={v:.4f}, val_ppl={math.exp(min(v,20)):.2f}")
                 if step % save_every == 0:
                     save_ckpt(accelerator, model, optimizer, scheduler, step, total_sup, cfg,
-                              os.path.join(cc["output_dir"], f"sft_ckpt_1b_{step:07d}.pt"))
+                              os.path.join(cc["output_dir"], f"sft_ckpt_1c_{step:07d}.pt"))
 
                 if step >= max_iters or (max_sup > 0 and total_sup >= max_sup):
                     break
+            pbar.update(1)
         if step >= max_iters or (max_sup > 0 and total_sup >= max_sup):
-            break
-        pbar.update(1)
+            break 
     pbar.close()
     save_ckpt(accelerator, model, optimizer, scheduler, step, total_sup, cfg,
-              os.path.join(cc["output_dir"], "sft_ckpt_1b_final.pt"))
+              os.path.join(cc["output_dir"], "sft_ckpt_1c_final.pt"))
     accelerator.print(f"done: steps={step:,}, supervised_tokens={total_sup:,}")
 
 
