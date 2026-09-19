@@ -28,7 +28,7 @@ class Router(nn.Module):
         self.num_experts = num_experts
         self.gate = nn.Linear(d_model, num_experts)
 
-    def forward(self, x):
+    def forward(self, x, valid_mask=None):
         # x shape: (batch_size, seq_len, d_model)
         batch_size, seq_len, _ = x.shape
         logits = self.gate(x) # (batch_size, seq_len, num_experts)
@@ -44,8 +44,22 @@ class Router(nn.Module):
         # Use bincount instead of histc for better performance on GPU
         #tokens_per_expert = torch.bincount(topk_indices.flatten(), minlength=self.num_experts).float() / (batch_size * seq_len * self.top_k)
         indices_one_hot = F.one_hot(topk_indices, num_classes=self.num_experts).float()
-        tokens_per_expert = indices_one_hot.sum(dim=(0,1,2)) / (batch_size * seq_len * self.top_k)
-        avg_prob_per_expert = probs.mean(dim=(0, 1))
+        if valid_mask is None:
+            valid_mask = torch.ones(
+                (batch_size, seq_len), dtype=torch.bool, device=x.device
+            )
+        else:
+            if valid_mask.shape != (batch_size, seq_len):
+                raise ValueError("valid_mask must have shape (batch_size, seq_len)")
+            valid_mask = valid_mask.to(device=x.device, dtype=torch.bool)
+
+        valid = valid_mask.to(dtype=probs.dtype)
+        valid_count = valid.sum()
+        denominator = valid_count.clamp_min(1.0)
+        tokens_per_expert = (
+            indices_one_hot * valid.unsqueeze(-1).unsqueeze(-1)
+        ).sum(dim=(0, 1, 2)) / (denominator * self.top_k)
+        avg_prob_per_expert = (probs * valid.unsqueeze(-1)).sum(dim=(0, 1)) / denominator
         aux_loss = self.num_experts * torch.sum(tokens_per_expert * avg_prob_per_expert)
 
         return topk_indices, topk_weights, aux_loss
@@ -59,21 +73,27 @@ class MoELayer(nn.Module):
         self.router = Router(d_model, num_experts, top_k)
         self.experts = nn.ModuleList([Expert(d_model, d_ff, dropout=dropout) for _ in range(num_experts)])
 
-    def forward(self, x):
+    def forward(self, x, valid_mask=None):
         batch_size, seq_len, d_model = x.shape
-        topk_indices, topk_weights, aux_loss = self.router(x)
+        topk_indices, topk_weights, aux_loss = self.router(x, valid_mask=valid_mask)
 
         # Flatten batch and seq dimensions for processing
         flat_x = x.view(-1, d_model)
         flat_indices = topk_indices.view(-1, self.top_k)
         flat_weights = topk_weights.view(-1, self.top_k)
+        flat_valid = None
+        if valid_mask is not None:
+            flat_valid = valid_mask.to(device=x.device, dtype=torch.bool).reshape(-1)
 
         combined_output = torch.zeros_like(flat_x)
 
         # Optimized gather/scatter processing
         for i, expert in enumerate(self.experts):
             # Find indices where this expert is selected
-            token_idx, k_idx = torch.where(flat_indices == i)
+            selected = flat_indices == i
+            if flat_valid is not None:
+                selected = selected & flat_valid.unsqueeze(1)
+            token_idx, k_idx = torch.where(selected)
             if token_idx.numel() > 0:
                 # Gather inputs for the expert
                 expert_input = flat_x[token_idx]
@@ -145,11 +165,11 @@ class TransformerBlock(nn.Module):
                 nn.Linear(d_ff, d_model)
             )
 
-    def forward(self, x, is_causal=True):
+    def forward(self, x, is_causal=True, valid_mask=None):
         attn_out = self.attn(self.ln1(x), is_causal=is_causal)
         x = x + attn_out
         if self.use_moe:
-            moe_out, aux_loss = self.moe(self.ln2(x))
+            moe_out, aux_loss = self.moe(self.ln2(x), valid_mask=valid_mask)
             x = x + moe_out
             return x, aux_loss
         else:
@@ -171,14 +191,14 @@ class MoETransformer(nn.Module):
         self.head.weight = self.token_emb.weight
         self.max_seq_len = max_seq_len
 
-    def forward(self, idx):
+    def forward(self, idx, valid_mask=None):
         batch_size, seq_len = idx.shape
         positions = torch.arange(0, seq_len, device=idx.device).unsqueeze(0)
         x = self.token_emb(idx) + self.pos_emb(positions)
 
         total_aux_loss = 0
         for block in self.blocks:
-            x, aux_loss = block(x, is_causal=True)
+            x, aux_loss = block(x, is_causal=True, valid_mask=valid_mask)
             total_aux_loss += aux_loss
 
         x = self.ln_f(x)

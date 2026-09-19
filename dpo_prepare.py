@@ -26,7 +26,7 @@ import tiktoken
 import torch
 from torch.utils.data import Dataset
 
-from sft_prepare import DATASET_LOADERS, END_TOKEN_STR, build_sft_prompt
+from sft_data_loader import DATASET_LOADERS, END_TOKEN_STR, build_sft_prompt
 
 
 def load_json(path: str) -> dict:

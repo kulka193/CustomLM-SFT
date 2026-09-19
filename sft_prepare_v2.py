@@ -6,9 +6,8 @@ import numpy as np
 import tiktoken
 from tqdm import tqdm
 
-# Reuse your existing HF dataset download/field parsing code.
-# This file must sit beside your current sft_prepare.py.
-import sft_prepare as legacy
+# Reuse the HF dataset download and field parsing code.
+import sft_data_loader as legacy
 
 IGNORE_INDEX = -100
 
@@ -127,7 +126,10 @@ def encode_example(record, enc, system_prompt, max_seq_length, long_policy="skip
     return tokens, labels, prompt
 
 
-def write_split(name, records, data_dir, enc, system_prompt, max_seq, long_policy):
+def write_split(
+    name, records, data_dir, enc, system_prompt, max_seq, long_policy,
+    source_to_id
+):
     encoded = []
     human = []
     skipped = 0
@@ -141,7 +143,7 @@ def write_split(name, records, data_dir, enc, system_prompt, max_seq, long_polic
             by_source[src]["skipped"] += 1
             continue
         tokens, labels, prompt = item
-        encoded.append((tokens, labels))
+        encoded.append((tokens, labels, source_to_id[src]))
         by_source[src]["kept"] += 1
         by_source[src]["supervised_tokens"] += sum(x != IGNORE_INDEX for x in labels)
         if name == "val":
@@ -150,8 +152,9 @@ def write_split(name, records, data_dir, enc, system_prompt, max_seq, long_polic
     if not encoded:
         raise RuntimeError(f"No usable examples in {name} split")
 
-    total = sum(len(t) for t, _ in encoded)
+    total = sum(len(t) for t, _, _ in encoded)
     offsets = np.empty((len(encoded), 2), dtype=np.int64)
+    source_ids = np.empty(len(encoded), dtype=np.int16)
     tok = np.memmap(os.path.join(data_dir, f"{name}_tokens.bin"), dtype=np.int32,
                     mode="w+", shape=(total,))
     lab = np.memmap(os.path.join(data_dir, f"{name}_labels.bin"), dtype=np.int32,
@@ -159,15 +162,17 @@ def write_split(name, records, data_dir, enc, system_prompt, max_seq, long_polic
 
     cursor = 0
     supervised = 0
-    for i, (tokens, labels) in enumerate(encoded):
+    for i, (tokens, labels, source_id) in enumerate(encoded):
         end = cursor + len(tokens)
         tok[cursor:end] = np.asarray(tokens, dtype=np.int32)
         lab[cursor:end] = np.asarray(labels, dtype=np.int32)
         offsets[i] = (cursor, end)
+        source_ids[i] = source_id
         supervised += sum(x != IGNORE_INDEX for x in labels)
         cursor = end
     tok.flush(); lab.flush()
     np.save(os.path.join(data_dir, f"{name}_offsets.npy"), offsets)
+    np.save(os.path.join(data_dir, f"{name}_source_ids.npy"), source_ids)
 
     if name == "val":
         with open(os.path.join(data_dir, "val_examples.jsonl"), "w", encoding="utf-8") as f:
@@ -202,6 +207,13 @@ def prepare(config_path, seed):
     enc = tiktoken.get_encoding("gpt2")
     train_records, val_records = [], []
     source_selection = {}
+    active_sources = [
+        name for name, requested_train in dc["dataset_mix"].items()
+        if requested_train > 0
+    ]
+    source_to_id = {
+        name: source_id for source_id, name in enumerate(active_sources)
+    }
 
     for k, (name, requested_train) in enumerate(dc["dataset_mix"].items()):
         if requested_train <= 0:
@@ -249,16 +261,20 @@ def prepare(config_path, seed):
     else:
         val_disjoint = True
 
-    train_stats = write_split("train", train_records, data_dir, enc, system_prompt,
-                              int(dc["max_seq_length"]), long_policy)
-    val_stats = write_split("val", val_records, data_dir, enc, system_prompt,
-                            int(dc["max_seq_length"]), long_policy)
+    train_stats = write_split(
+        "train", train_records, data_dir, enc, system_prompt,
+        int(dc["max_seq_length"]), long_policy, source_to_id
+    )
+    val_stats = write_split(
+        "val", val_records, data_dir, enc, system_prompt,
+        int(dc["max_seq_length"]), long_policy, source_to_id
+    )
 
     metadata = {
         "seed": seed, "tokenizer": "gpt2", "eot_token": enc.eot_token,
         "ignore_index": IGNORE_INDEX, "system_prompt": system_prompt,
         "long_example_policy": long_policy, "val_is_disjoint": val_disjoint,
-        "source_selection": source_selection,
+        "source_selection": source_selection, "source_to_id": source_to_id,
         "train": train_stats, "val": val_stats, "config_snapshot": cfg,
     }
     with open(os.path.join(data_dir, "metadata.json"), "w") as f:

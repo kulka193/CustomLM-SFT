@@ -9,7 +9,7 @@ from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from model_moe import MoETransformer
@@ -26,8 +26,15 @@ class IndexedSFTDataset(Dataset):
                                 dtype=np.int32, mode="r")
         self.offsets = np.load(os.path.join(data_dir, f"{split}_offsets.npy"),
                                mmap_mode="r")
+        source_ids_path = os.path.join(data_dir, f"{split}_source_ids.npy")
+        self.source_ids = (
+            np.load(source_ids_path, mmap_mode="r")
+            if os.path.exists(source_ids_path) else None
+        )
         if len(self.tokens) != len(self.labels):
             raise ValueError("token/label file length mismatch")
+        if self.source_ids is not None and len(self.source_ids) != len(self.offsets):
+            raise ValueError("source-ID/offset file length mismatch")
 
     def __len__(self):
         return len(self.offsets)
@@ -38,6 +45,53 @@ class IndexedSFTDataset(Dataset):
         t = torch.from_numpy(np.asarray(self.tokens[start:end], dtype=np.int64).copy())
         l = torch.from_numpy(np.asarray(self.labels[start:end], dtype=np.int64).copy())
         return t, l
+
+
+def build_weighted_sampler(dataset, data_config, metadata, seed):
+    """Build per-example sampling weights from source-level multipliers."""
+    source_weights = data_config.get("dataset_wt")
+    if not source_weights:
+        return None, {}
+    if dataset.source_ids is None:
+        raise RuntimeError(
+            "dataset_wt requires prepared source IDs. Regenerate data with "
+            "sft_prepare_v2.py."
+        )
+
+    source_to_id = metadata.get("source_to_id")
+    if not source_to_id:
+        raise RuntimeError(
+            "metadata.json has no source_to_id mapping. Regenerate prepared data."
+        )
+
+    sample_weights = np.zeros(len(dataset), dtype=np.float64)
+    weighted_mass = {}
+    for source, source_id in source_to_id.items():
+        mask = np.asarray(dataset.source_ids == int(source_id))
+        count = int(mask.sum())
+        if count == 0:
+            continue
+        multiplier = float(source_weights.get(source, 1.0))
+        if multiplier < 0:
+            raise ValueError(f"dataset_wt[{source!r}] must be non-negative")
+        sample_weights[mask] = multiplier
+        weighted_mass[source] = count * multiplier
+
+    total_mass = sum(weighted_mass.values())
+    if total_mass <= 0 or not np.any(sample_weights > 0):
+        raise ValueError("dataset_wt gives zero sampling probability to all examples")
+
+    expected_shares = {
+        source: mass / total_mass for source, mass in weighted_mass.items()
+    }
+    generator = torch.Generator().manual_seed(seed)
+    sampler = WeightedRandomSampler(
+        weights=torch.from_numpy(sample_weights),
+        num_samples=len(dataset),
+        replacement=True,
+        generator=generator,
+    )
+    return sampler, expected_shares
 
 
 class SFTCollator:
@@ -69,7 +123,8 @@ class SFTCollator:
             if len(x) > self.max_seq - 1:
                 raise RuntimeError("prepared example exceeds max_seq_length")
             if torch.any(y != IGNORE_INDEX):
-                xs.append(x); ys.append(y)
+                xs.append(x)
+                ys.append(y)
 
         if not xs:
             raise RuntimeError("batch has no supervised tokens")
@@ -83,11 +138,13 @@ class SFTCollator:
         # causal real-token positions cannot attend to future pad positions.
         X = torch.full((len(xs), T), self.eot, dtype=torch.long)
         Y = torch.full((len(xs), T), IGNORE_INDEX, dtype=torch.long)
+        valid_mask = torch.zeros((len(xs), T), dtype=torch.bool)
         for i, (x, y) in enumerate(zip(xs, ys)):
             n = len(x)
             X[i, :n] = x
             Y[i, :n] = y
-        return {"input_ids": X, "labels": Y}
+            valid_mask[i, :n] = True
+        return {"input_ids": X, "labels": Y, "valid_mask": valid_mask}
 
 
 def build_model(cfg):
@@ -135,7 +192,9 @@ def evaluate(model, loader, accelerator, eval_iters):
     loss_sum = torch.zeros((), device=accelerator.device)
     token_count = torch.zeros((), device=accelerator.device)
     for i, batch in enumerate(loader):
-        logits, _ = model(batch["input_ids"])
+        logits, _ = model(
+            batch["input_ids"], valid_mask=batch["valid_mask"]
+        )
         y = batch["labels"]
         loss_sum += F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), y.reshape(-1),
@@ -151,7 +210,10 @@ def evaluate(model, loader, accelerator, eval_iters):
     return out
 
 
-def save_ckpt(accelerator, model, optimizer, scheduler, step, sup_tokens, cfg, path):
+def save_ckpt(
+    accelerator, model, optimizer, scheduler, step,
+    stage_sup_tokens, lifetime_sup_tokens, cfg, path
+):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         torch.save({
@@ -159,7 +221,10 @@ def save_ckpt(accelerator, model, optimizer, scheduler, step, sup_tokens, cfg, p
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "iter": step,
-            "supervised_tokens": sup_tokens,
+            "stage_supervised_tokens": stage_sup_tokens,
+            "lifetime_supervised_tokens": lifetime_sup_tokens,
+            # Backward compatibility for existing checkpoint readers.
+            "supervised_tokens": lifetime_sup_tokens,
             "config": cfg,
         }, path)
         accelerator.print(f"saved {path}")
@@ -186,8 +251,17 @@ def main(config_path, seed):
     collate = SFTCollator(enc.eot_token, dc["max_seq_length"], dc.get("pad_to_multiple_of", 8))
     train_ds = IndexedSFTDataset(dc["data_dir"], "train")
     val_ds = IndexedSFTDataset(dc["data_dir"], "val")
+    metadata = {}
+    if dc.get("dataset_wt"):
+        metadata_path = os.path.join(dc["data_dir"], "metadata.json")
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    train_sampler, expected_source_shares = build_weighted_sampler(
+        train_ds, dc, metadata, seed
+    )
     train_loader = DataLoader(
-        train_ds, batch_size=tc["batch_size"], shuffle=True,
+        train_ds, batch_size=tc["batch_size"], sampler=train_sampler,
+        shuffle=train_sampler is None,
         num_workers=dc.get("num_workers", 2), pin_memory=True,
         collate_fn=collate, drop_last=True
     )
@@ -196,26 +270,34 @@ def main(config_path, seed):
         num_workers=dc.get("num_workers", 2), pin_memory=True,
         collate_fn=collate, drop_last=False
     )
+    if expected_source_shares:
+        accelerator.print(
+            "expected weighted example shares: "
+            + ", ".join(
+                f"{source}={share:.1%}"
+                for source, share in expected_source_shares.items()
+            )
+        )
 
     model = build_model(cfg)
     freeze_n = int(tc.get("freeze_layers", 0))
     for i in range(min(freeze_n, len(model.blocks))):
         for p in model.blocks[i].parameters(): p.requires_grad = False
 
-    step, total_sup = 0, 0
+    step, stage_sup, lifetime_sup = 0, 0, 0
     optimizer = build_optimizer(model, tc)
     if cc.get("resume_from"):
         state = torch.load(cc["resume_from"], map_location="cpu", weights_only=True)
         model.load_state_dict(state["model"], strict=True)
         optimizer.load_state_dict(state["optimizer"])
-        #scheduler.load_state_dict(state["scheduler"])
         for param_group in optimizer.param_groups:
             param_group["lr"] = tc["lr"]
             param_group["initial_lr"] = tc["lr"]
         # Build a NEW scheduler AFTER optimizer loading/LR override
         scheduler = build_scheduler(optimizer, tc)
-        step = int(state.get("iter", 0))
-        total_sup = int(state.get("supervised_tokens", 0))
+        lifetime_sup = int(state.get(
+            "lifetime_supervised_tokens", state.get("supervised_tokens", 0)
+        ))
     else:
         load_base(model, cc["base_model_path"])
         optimizer = build_optimizer(model, tc)
@@ -224,7 +306,8 @@ def main(config_path, seed):
         f"train examples={len(train_ds):,}, val examples={len(val_ds):,}, "
         f"trainable params={sum(p.numel() for p in model.parameters() if p.requires_grad):,}\n"
         f"LR={tc['lr']:.2e}, minLR={tc['min_lr']:.2e}, warmup={tc['warmup_iters']}\n"
-        f"resuming from step={step}, last trained total_supervised_tokens={total_sup}"
+        f"stage_step={step}, stage_supervised_tokens={stage_sup}, "
+        f"lifetime_supervised_tokens={lifetime_sup}"
     )
 
     model, optimizer, train_loader, val_loader = accelerator.prepare(
@@ -238,18 +321,19 @@ def main(config_path, seed):
     save_every = int(tc.get("save_interval", 5000))
     aux_w = float(tc.get("aux_loss_weight", 1e-3))
     recent_ce = recent_total = 0.0; recent_n = 0
+    token_progress = max_sup > 0
     pbar = tqdm(
-        total=max_iters,
-        initial=step,
-        desc="SFT",
-        unit="step",
+        total=max_sup if token_progress else max_iters,
+        initial=stage_sup if token_progress else step,
+        desc="SFT stage",
+        unit="tok" if token_progress else "step",
         disable=not accelerator.is_local_main_process,
     )
     while step < max_iters:
         for batch in train_loader:  # reshuffles on every new epoch
             with accelerator.accumulate(model):
                 x, y = batch["input_ids"], batch["labels"]
-                logits, aux_loss = model(x)
+                logits, aux_loss = model(x, valid_mask=batch["valid_mask"])
                 ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1),
                                      ignore_index=IGNORE_INDEX)
                 loss = ce + (aux_w * aux_loss if aux_loss is not None else 0.0)
@@ -263,7 +347,11 @@ def main(config_path, seed):
 
                 # Count globally across GPUs.
                 local_n = (y != IGNORE_INDEX).sum().to(accelerator.device)
-                total_sup += int(accelerator.reduce(local_n, reduction="sum").item())
+                batch_sup = int(accelerator.reduce(local_n, reduction="sum").item())
+                stage_sup += batch_sup
+                lifetime_sup += batch_sup
+                if token_progress:
+                    pbar.update(batch_sup)
                 recent_ce += ce.detach().float().item()
                 recent_total += loss.detach().float().item()
                 recent_n += 1
@@ -274,24 +362,31 @@ def main(config_path, seed):
                     accelerator.print(
                         f"step={step:,} ce={recent_ce/recent_n:.4f} "
                         f"loss={recent_total/recent_n:.4f} "
-                        f"lr={optimizer.param_groups[0]['lr']:.3e} sup_tokens={total_sup:,}"
+                        f"lr={optimizer.param_groups[0]['lr']:.3e} "
+                        f"stage_sup_tokens={stage_sup:,} lifetime_sup_tokens={lifetime_sup:,}"
                     )
                     recent_ce = recent_total = 0.0; recent_n = 0
                     v = evaluate(model, val_loader, accelerator, int(tc.get("eval_iters", 50)))
                     accelerator.print(f"  val_response_ce={v:.4f}, val_ppl={math.exp(min(v,20)):.2f}")
                 if step % save_every == 0:
-                    save_ckpt(accelerator, model, optimizer, scheduler, step, total_sup, cfg,
+                    save_ckpt(accelerator, model, optimizer, scheduler, step,
+                              stage_sup, lifetime_sup, cfg,
                               os.path.join(cc["output_dir"], f"sft_ckpt_1c_{step:07d}.pt"))
 
-                if step >= max_iters or (max_sup > 0 and total_sup >= max_sup):
+                if not token_progress:
+                    pbar.update(1)
+                if step >= max_iters or (max_sup > 0 and stage_sup >= max_sup):
                     break
-            pbar.update(1)
-        if step >= max_iters or (max_sup > 0 and total_sup >= max_sup):
+        if step >= max_iters or (max_sup > 0 and stage_sup >= max_sup):
             break 
     pbar.close()
-    save_ckpt(accelerator, model, optimizer, scheduler, step, total_sup, cfg,
+    save_ckpt(accelerator, model, optimizer, scheduler, step,
+              stage_sup, lifetime_sup, cfg,
               os.path.join(cc["output_dir"], "sft_ckpt_1c_final.pt"))
-    accelerator.print(f"done: steps={step:,}, supervised_tokens={total_sup:,}")
+    accelerator.print(
+        f"done: stage_steps={step:,}, stage_supervised_tokens={stage_sup:,}, "
+        f"lifetime_supervised_tokens={lifetime_sup:,}"
+    )
 
 
 if __name__ == "__main__":

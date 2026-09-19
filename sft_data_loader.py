@@ -176,12 +176,45 @@ def load_code_python(cache_dir: str) -> list[dict]:
         "You are an expert at Python programming. Provide a concise and accurate "
         "solution to the following Python coding problem."
     )
+    
+    seen = set()
+
+    PYTHON_TASK_TEMPLATES = (
+    "Write Python code to complete the following task:\n\n{task}",
+    "Implement the following task in Python:\n\n{task}",
+    "Could you provide Python code for this task?\n\n{task}",
+    "Create a Python program that accomplishes this task:\n\n{task}",
+    "Solve the following task using Python code:\n\n{task}",
+    "Can you write a Python program for the following task?\n\n{task}",
+)
+
+    import hashlib
+    def add_python_intent(task: str) -> str:
+        digest = hashlib.sha256(task.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:4], "big") % len(PYTHON_TASK_TEMPLATES)
+        return PYTHON_TASK_TEMPLATES[index].format(task=task)
     for ex in ds:
-        instruction = ex.get("instruction", "").strip()
+        raw_instruction = ex.get("instruction", "").strip()
         response = (ex.get("input", "").strip() + "\n" + ex.get("output", "").strip()).strip()
-        if not instruction or not response:
+
+        if not raw_instruction or not response:
             continue
-        out.append({"prompt": build_sft_prompt(system, instruction), "response": response})
+
+        # Deduplicate the effective instruction-response pair. The repository
+        # contains JSON and JSONL copies that HF may load together.
+        
+        key = (raw_instruction, response)
+        if key in seen:
+            continue
+        seen.add(key)
+        
+        instruction = add_python_intent(raw_instruction)
+
+        out.append({
+            "prompt": build_sft_prompt(system, instruction),
+            "response": response,
+        })
+
     return out
 
 

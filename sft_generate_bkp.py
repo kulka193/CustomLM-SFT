@@ -75,7 +75,7 @@ import warnings
 import torch
 import torch.nn.functional as F
 import tiktoken
-from sft_prepare import build_sft_prompt
+from sft_data_loader import build_sft_prompt
 from model_moe import MoETransformer
 
 warnings.filterwarnings("ignore")
