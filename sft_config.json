@@ -35,7 +35,7 @@
         "dataset_mix": {
             "alpaca":                   0,
             "dolly":                    0,
-            "evol_instruct":            20000,
+            "evol_instruct":            10000,
             "everyday_conversations":   2200,
             "gsm8k":                    7000,
             "code_python":              10000,
@@ -45,18 +45,18 @@
             "smoltalk_summarize_rewrite":10000,
             "eli5":                     10000
         },
-        "dataset_wt": {
-            "alpaca":                   0,
-            "dolly":                    0,
-            "evol_instruct":            1.0,
-            "everyday_conversations":   1.5,
-            "gsm8k":                    0.7,
-            "code_python":              0.7,
-            "orca_math":                0.7,
-            "smollm_basics":            1.5,
-            "smoltalk_10k":             1.5,
-            "smoltalk_summarize_rewrite":1.1,
-            "eli5":                     0.9
+        "source_mix_percent": {
+            "alpaca":                    0,
+            "dolly":                     0,
+            "evol_instruct":            30,
+            "everyday_conversations":   15,
+            "gsm8k":                     5,
+            "code_python":              10,
+            "orca_math":                 5,
+            "smollm_basics":             5,
+            "smoltalk_10k":              0,
+            "smoltalk_summarize_rewrite":15,
+            "eli5":                     15
         },
         "n_eval_examples_per_dataset": 25,
         "prompt_template": "alpaca"

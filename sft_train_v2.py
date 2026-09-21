@@ -47,14 +47,14 @@ class IndexedSFTDataset(Dataset):
         return t, l
 
 
-def build_weighted_sampler(dataset, data_config, metadata, seed):
-    """Build per-example sampling weights from source-level multipliers."""
-    source_weights = data_config.get("dataset_wt")
-    if not source_weights:
+def build_source_sampler(dataset, data_config, metadata, seed):
+    """Sample sources by configured percentage, then rows uniformly per source."""
+    source_mix = data_config.get("source_mix_percent")
+    if not source_mix:
         return None, {}
     if dataset.source_ids is None:
         raise RuntimeError(
-            "dataset_wt requires prepared source IDs. Regenerate data with "
+            "source_mix_percent requires prepared source IDs. Regenerate data with "
             "sft_prepare_v2.py."
         )
 
@@ -64,26 +64,55 @@ def build_weighted_sampler(dataset, data_config, metadata, seed):
             "metadata.json has no source_to_id mapping. Regenerate prepared data."
         )
 
+    configured_sources = set(source_mix)
+    prepared_sources = set(source_to_id)
+    missing = sorted(prepared_sources - configured_sources)
+    if missing:
+        raise ValueError(
+            "source_mix_percent is missing prepared sources: " + ", ".join(missing)
+        )
+
+    percentages = {}
+    for source, value in source_mix.items():
+        percentage = float(value)
+        if percentage < 0:
+            raise ValueError(
+                f"source_mix_percent[{source!r}] must be non-negative"
+            )
+        if percentage > 0 and source not in prepared_sources:
+            raise ValueError(
+                f"source_mix_percent gives {source!r} {percentage:g}%, but that "
+                "source has no prepared examples"
+            )
+        percentages[source] = percentage
+
+    total_percentage = sum(percentages.values())
+    if not math.isclose(total_percentage, 100.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError(
+            f"source_mix_percent must sum to 100, got {total_percentage:g}"
+        )
+
     sample_weights = np.zeros(len(dataset), dtype=np.float64)
-    weighted_mass = {}
+    expected_shares = {}
     for source, source_id in source_to_id.items():
         mask = np.asarray(dataset.source_ids == int(source_id))
         count = int(mask.sum())
-        if count == 0:
+        percentage = percentages[source]
+        if percentage == 0:
             continue
-        multiplier = float(source_weights.get(source, 1.0))
-        if multiplier < 0:
-            raise ValueError(f"dataset_wt[{source!r}] must be non-negative")
-        sample_weights[mask] = multiplier
-        weighted_mass[source] = count * multiplier
+        if count == 0:
+            raise ValueError(
+                f"source_mix_percent gives {source!r} {percentage:g}%, but the "
+                "training split contains no rows for it"
+            )
+        # WeightedRandomSampler assigns weight per row. Dividing a source's
+        # probability mass equally across its rows makes the source-level draw
+        # probability match the configured percentage.
+        sample_weights[mask] = (percentage / 100.0) / count
+        expected_shares[source] = percentage / 100.0
 
-    total_mass = sum(weighted_mass.values())
-    if total_mass <= 0 or not np.any(sample_weights > 0):
-        raise ValueError("dataset_wt gives zero sampling probability to all examples")
-
-    expected_shares = {
-        source: mass / total_mass for source, mass in weighted_mass.items()
-    }
+    if not np.any(sample_weights > 0):
+        raise ValueError("source_mix_percent gives zero probability to all examples")
     generator = torch.Generator().manual_seed(seed)
     sampler = WeightedRandomSampler(
         weights=torch.from_numpy(sample_weights),
@@ -252,11 +281,11 @@ def main(config_path, seed):
     train_ds = IndexedSFTDataset(dc["data_dir"], "train")
     val_ds = IndexedSFTDataset(dc["data_dir"], "val")
     metadata = {}
-    if dc.get("dataset_wt"):
+    if dc.get("source_mix_percent"):
         metadata_path = os.path.join(dc["data_dir"], "metadata.json")
         with open(metadata_path, "r", encoding="utf-8") as f:
             metadata = json.load(f)
-    train_sampler, expected_source_shares = build_weighted_sampler(
+    train_sampler, expected_source_shares = build_source_sampler(
         train_ds, dc, metadata, seed
     )
     train_loader = DataLoader(
@@ -272,7 +301,7 @@ def main(config_path, seed):
     )
     if expected_source_shares:
         accelerator.print(
-            "expected weighted example shares: "
+            "configured source example shares: "
             + ", ".join(
                 f"{source}={share:.1%}"
                 for source, share in expected_source_shares.items()
