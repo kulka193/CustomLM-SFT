@@ -276,6 +276,22 @@ def main(config_path, seed):
             find_unused_parameters=dist.get("find_unused_parameters", False))]
     )
 
+    wandb_run = None
+    wandb_cfg = cfg.get("wandb_config", {})
+    if accelerator.is_main_process and wandb_cfg.get("enabled", False):
+        try:
+            import wandb
+        except ImportError as exc:
+            raise RuntimeError(
+                "W&B logging is enabled but wandb is not installed. "
+                "Run: pip install wandb"
+            ) from exc
+        wandb.login()
+        wandb_run = wandb.init(
+            project=wandb_cfg.get("project", "customlm-sft"),
+            config=tc,
+        )
+
     enc = tiktoken.get_encoding("gpt2")
     collate = SFTCollator(enc.eot_token, dc["max_seq_length"], dc.get("pad_to_multiple_of", 8))
     train_ds = IndexedSFTDataset(dc["data_dir"], "train")
@@ -388,15 +404,31 @@ def main(config_path, seed):
             if accelerator.sync_gradients:
                 step += 1
                 if step % log_every == 0:
+                    train_ce = recent_ce / recent_n
+                    train_loss = recent_total / recent_n
+                    learning_rate = optimizer.param_groups[0]["lr"]
                     accelerator.print(
-                        f"step={step:,} ce={recent_ce/recent_n:.4f} "
-                        f"loss={recent_total/recent_n:.4f} "
-                        f"lr={optimizer.param_groups[0]['lr']:.3e} "
+                        f"step={step:,} ce={train_ce:.4f} "
+                        f"loss={train_loss:.4f} "
+                        f"lr={learning_rate:.3e} "
                         f"stage_sup_tokens={stage_sup:,} lifetime_sup_tokens={lifetime_sup:,}"
                     )
-                    recent_ce = recent_total = 0.0; recent_n = 0
                     v = evaluate(model, val_loader, accelerator, int(tc.get("eval_iters", 50)))
-                    accelerator.print(f"  val_response_ce={v:.4f}, val_ppl={math.exp(min(v,20)):.2f}")
+                    val_ppl = math.exp(min(v, 20))
+                    accelerator.print(f"  val_response_ce={v:.4f}, val_ppl={val_ppl:.2f}")
+
+                    if wandb_run is not None:
+                        wandb_run.log({
+                            "train/response_ce": train_ce,
+                            "train/loss": train_loss,
+                            "train/learning_rate": learning_rate,
+                            "train/stage_supervised_tokens": stage_sup,
+                            "train/lifetime_supervised_tokens": lifetime_sup,
+                            "eval/response_ce": v,
+                            "eval/perplexity": val_ppl,
+                        }, step=step)
+
+                    recent_ce = recent_total = 0.0; recent_n = 0
 
                     router_stats = model.get_router_stats()
                     if accelerator.is_main_process and router_stats:
@@ -429,6 +461,8 @@ def main(config_path, seed):
         f"done: stage_steps={step:,}, stage_supervised_tokens={stage_sup:,}, "
         f"lifetime_supervised_tokens={lifetime_sup:,}"
     )
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

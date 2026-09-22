@@ -48,15 +48,15 @@
         "source_mix_percent": {
             "alpaca":                    0,
             "dolly":                     0,
-            "evol_instruct":            30,
+            "evol_instruct":            20,
             "everyday_conversations":   15,
             "gsm8k":                     5,
             "code_python":              10,
             "orca_math":                 5,
-            "smollm_basics":             5,
-            "smoltalk_10k":              0,
+            "smollm_basics":             10,
+            "smoltalk_10k":              10,
             "smoltalk_summarize_rewrite":15,
-            "eli5":                     15
+            "eli5":                     10
         },
         "n_eval_examples_per_dataset": 25,
         "prompt_template": "alpaca"
@@ -64,11 +64,15 @@
     "checkpoint_config": {
         "base_model_path": "./model_ckpt_0906/ckpt_dist_bf16_1375000.pt",
         "output_dir": "./sft_checkpoints",
-        "resume_from": "sft_checkpoints/sft_ckpt_1a_final_60MT.pt"
+        "resume_from": null
     },
     "distributed_config": {
         "num_processes": 1,
         "mixed_precision": "bf16",
         "find_unused_parameters": false
+    },
+    "wandb_config": {
+        "enabled": true,
+        "project": "customlm-sft"
     }
 }

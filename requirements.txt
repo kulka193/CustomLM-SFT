@@ -12,3 +12,4 @@ datasets
 numpy
 tiktoken
 tqdm
+wandb
