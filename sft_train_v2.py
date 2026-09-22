@@ -397,6 +397,19 @@ def main(config_path, seed):
                     recent_ce = recent_total = 0.0; recent_n = 0
                     v = evaluate(model, val_loader, accelerator, int(tc.get("eval_iters", 50)))
                     accelerator.print(f"  val_response_ce={v:.4f}, val_ppl={math.exp(min(v,20)):.2f}")
+
+                    router_stats = model.get_router_stats()
+                    if accelerator.is_main_process and router_stats:
+                        aux = sum(s["aux"] for _, s in router_stats) / len(router_stats)
+                        avg_cv = sum(s["cv"] for _, s in router_stats) / len(router_stats)
+                        worst_layer, worst = max(router_stats, key=lambda x: x[1]["cv"])
+                        accelerator.print(  f"router: aux={aux:.3f} "
+                                            #average coefficient_of_variation-> std deviation expert usage / mean expert usage 
+                                            f"avg_cv={avg_cv:.2f} "  
+                                            f"worst=Layer{worst_layer} "
+                                            f"min={worst['min']*100:.1f}% "
+                                            f"max={worst['max']*100:.1f}% "
+                                            f"cv={worst['cv']:.2f}")
                 if step % save_every == 0:
                     save_ckpt(accelerator, model, optimizer, scheduler, step,
                               stage_sup, lifetime_sup, cfg,

@@ -61,7 +61,14 @@ class Router(nn.Module):
         ).sum(dim=(0, 1, 2)) / (denominator * self.top_k)
         avg_prob_per_expert = (probs * valid.unsqueeze(-1)).sum(dim=(0, 1)) / denominator
         aux_loss = self.num_experts * torch.sum(tokens_per_expert * avg_prob_per_expert)
-
+        # lightweight diagnostics
+        with torch.no_grad():
+            usage = tokens_per_expert.detach()
+            self.last_stats = {
+                "min": usage.min().item(),
+                "max": usage.max().item(),
+                "cv": (usage.std() / usage.mean().clamp_min(1e-8)).item(),
+            }
         return topk_indices, topk_weights, aux_loss
     
 
@@ -208,6 +215,16 @@ class MoETransformer(nn.Module):
         #    loss = loss + 0.01 * total_aux_loss
 
         return logits, total_aux_loss
+
+    def get_router_stats(self):
+        stats = []
+
+        for i, block in enumerate(self.blocks):
+            if block.use_moe and hasattr(block.moe.router, "last_stats"):
+                s = block.moe.router.last_stats
+                stats.append((i, s))
+
+        return stats
 
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
