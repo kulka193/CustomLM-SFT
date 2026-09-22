@@ -432,11 +432,9 @@ def main(config_path, seed):
 
                     router_stats = model.get_router_stats()
                     if accelerator.is_main_process and router_stats:
-                        aux = sum(s["aux"] for _, s in router_stats) / len(router_stats)
                         avg_cv = sum(s["cv"] for _, s in router_stats) / len(router_stats)
                         worst_layer, worst = max(router_stats, key=lambda x: x[1]["cv"])
-                        accelerator.print(  f"router: aux={aux:.3f} "
-                                            #average coefficient_of_variation-> std deviation expert usage / mean expert usage 
+                        accelerator.print(  #average coefficient_of_variation-> std deviation expert usage / mean expert usage 
                                             f"avg_cv={avg_cv:.2f} "  
                                             f"worst=Layer{worst_layer} "
                                             f"min={worst['min']*100:.1f}% "
