@@ -129,7 +129,7 @@ def load_sft_model(
     checkpoint_path: str,
     config_path: str,
     device: torch.device,
-) -> tuple[MoETransformer, dict, str]:
+) -> tuple[MoETransformer, dict]:
     """
     Load an SFT checkpoint 
 
@@ -137,54 +137,27 @@ def load_sft_model(
     -------
     model  : MoETransformer  ready for inference (eval mode, on device)
     config : dict            the model_config sub-dict used to build the model
-    system_prompt : str      the system prompt used by sft_prepare_v2.py
     """
     print(f"Loading checkpoint: {checkpoint_path}")
     raw = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
     # ── Determine whether this is a wrapped or raw state_dict ────────────────
     if isinstance(raw, dict) and "model" in raw:
-        state_dict    = raw["model"]
-        saved_cfg     = raw.get("config", None)
-        saved_iter    = raw.get("iter",   "unknown")
+        state_dict = raw["model"]
     else:
         # Raw state_dict (e.g. saved with accelerator.save(model.state_dict()))
-        state_dict    = raw
-        saved_cfg     = None
-        saved_iter    = "unknown"
+        state_dict = raw
 
     # ── Resolve model architecture config ────────────────────────────────────
-    full_cfg = None
-    if saved_cfg is not None and "model_config" in saved_cfg:
-        full_cfg = saved_cfg
-        mc = saved_cfg["model_config"]
-        print(f"  Config source : embedded in checkpoint (iter={saved_iter})")
-    else:
-        # Fall back to the config file on disk
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(
-                f"No config embedded in checkpoint and '{config_path}' not found. "
-                "Pass --config pointing to your sft_config_v2.json."
-            )
-        with open(config_path, "r") as f:
-            disk_cfg = json.load(f)
-        full_cfg = disk_cfg
-        mc = disk_cfg["model_config"]
-        print(f"  Config source : {config_path}")
-
-    dc = full_cfg.get("data_config", {}) if isinstance(full_cfg, dict) else {}
-    system_prompt = dc.get("system_prompt")
-    if not system_prompt:
-        metadata_path = os.path.join(dc.get("data_dir", "./sft_data"), "metadata.json")
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                metadata = json.load(f)
-            system_prompt = metadata.get("system_prompt")
-            if system_prompt:
-                print(f"  Prompt source : {metadata_path}")
-    if not system_prompt:
-        system_prompt = DEFAULT_SYSTEM_PROMPT
-        print("  Prompt source : sft_prepare_v2.DEFAULT_SYSTEM_PROMPT")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(
+            f"Config file '{config_path}' not found. "
+            "Pass --config pointing to your sft_config.json."
+        )
+    with open(config_path, "r", encoding="utf-8") as f:
+        disk_cfg = json.load(f)
+    mc = disk_cfg["model_config"]
+    print(f"  Config source : {config_path}")
 
     print(
         f"  Architecture  : d_model={mc['d_model']}  layers={mc['num_layers']}  "
@@ -217,7 +190,7 @@ def load_sft_model(
     size_mb      = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024 ** 2
     print(f"  Parameters    : {total_params:,}  ({size_mb:.1f} MB)")
 
-    return model, mc, system_prompt
+    return model, mc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -743,9 +716,8 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         metavar="TEXT",
         help=(
-            "Override the v2 training system prompt. By default this is read "
-            "from the checkpoint config, sft_data/metadata.json, or "
-            "sft_prepare_v2.DEFAULT_SYSTEM_PROMPT."
+            "Override the system prompt. By default, inference uses the "
+            "built-in general system prompt."
         ),
     )
 
@@ -753,11 +725,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=str,
-        default="sft_config_v2.json",
+        default="sft_config.json",
         metavar="PATH",
         help=(
-            "Path to sft_config_v2.json. Only needed when the checkpoint does not "
-            "carry an embedded config dict (default: sft_config_v2.json)."
+            "Path to the disk configuration used to construct the model "
+            "(default: sft_config.json)."
         ),
     )
 
@@ -850,7 +822,8 @@ def main() -> None:
     # ── Tokeniser ─────────────────────────────────────────────────────────────
     enc = tiktoken.get_encoding("gpt2")
     # ── Model ─────────────────────────────────────────────────────────────────
-    model, mc, system_prompt = load_sft_model(args.checkpoint, args.config, device)
+    model, mc = load_sft_model(args.checkpoint, args.config, device)
+    system_prompt = DEFAULT_SYSTEM_PROMPT
     if args.system_prompt is not None:
         system_prompt = args.system_prompt.strip()
     block_size = mc["block_size"]
