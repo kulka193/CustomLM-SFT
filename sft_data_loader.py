@@ -1,51 +1,66 @@
 """Dataset loaders shared by the v2 SFT preparation pipeline."""
 
 import re
+import random
 from datasets import concatenate_datasets, load_dataset
-ALPACA_WITH_INPUT = (
-    "### SYSTEM:\n{system}\n\n"
-    "### Instruction:\n{instruction}\n\n"
-    "### Input:\n{input}\n\n"
-    "### Response:\n"
-)
-
-ALPACA_NO_INPUT = (
-    "### SYSTEM:\n{system}\n\n"
-    "### Instruction:\n{instruction}\n\n"
-    "### Response:\n"
-)
 
 
-def build_sft_prompt(system: str, instruction: str, input_text: str = "") -> str:
-    system = system.strip()
-    instruction = instruction.strip()
-    input_text = input_text.strip()
-    if input_text:
-        return ALPACA_WITH_INPUT.format(
-            system=system,
-            instruction=instruction,
-            input=input_text,
-        )
-    return ALPACA_NO_INPUT.format(system=system, instruction=instruction)
+rng = random.Random()
+
+SYSTEM_PROMPT_TEMPLATE = {
+    "General": [
+        "You are a helpful assistant. Answer directly and accurately.",
+        "You are a helpful assistant who answers general questions. Respond to the user's request directly, accurately, and concisely.",
+        "Provide a concise, relevant, and factual response to the user's request.",
+        "Give an accurate and useful answer without unnecessary filler or unrelated details.",
+    ],
+    "Math": [
+        "You are a helpful math assistant. Solve the problem accurately and show concise reasoning when needed.",
+        "Work through the mathematical problem carefully and provide a correct, concise solution.",
+        "Solve the math question using clear reasoning, showing only the steps necessary to understand the answer.",
+        "Provide an accurate solution to the math problem and explain important calculations or reasoning.",
+    ],
+    "Code": [
+        "You are a helpful code assistant. Provide correct, concise code and explanation when useful.",
+        "Respond to the programming question with accurate code and focus on solving the requested problem directly.",
+        "Provide a clear and correct programming solution, including explanation only where it helps understanding.",
+        "Write reliable code that satisfies the user's requirements and briefly explain important implementation details.",
+    ],
+    "Rewrite-summarize": [
+        "You are a helpful writing assistant. Follow the requested transformation faithfully and concisely.",
+        "Follow the requested writing task carefully and produce a clear, concise, and faithful result.",
+        "Rewrite or summarize the provided content as requested, keeping the important information accurate.",
+        "Perform the requested text transformation while preserving relevant details and avoiding unnecessary additions.",
+    ],
+    "Casual-Query": [
+        "You are an AI assistant who provides simple and easy to understand answers to casual user queries",
+        "Explain the topic in easy-to-understand language like I am five",
+        "Describe the concept in a simple and intuitive way, using examples only when they improve understanding.",
+        "Provide a clear beginner-friendly explanation without unnecessary technical complexity.",
+    ],
+    "Greeting": [
+        "You are a friendly assistant. Greet the user politely and identify yourself",
+        "Respond to the user with your identity and greet the user"
+        "Say hello to the user in a friendly greeting and keep it concise and relevant to the user's query",
+        "Briefly introduce yourself and greet the user casually",
+    ],
+}
+
+
 
 
 def load_alpaca(cache_dir: str) -> list[dict]:
     """tatsu-lab/alpaca single-turn instruction examples."""
     ds = load_dataset("tatsu-lab/alpaca", split="train", cache_dir=cache_dir)
     out = []
-    system = (
-        "You are a helpful, precise, and honest AI assistant. Analyze the "
-        "instruction and any provided input context carefully. Deliver a direct, "
-        "accurate, and completely factual response that fulfills the request "
-        "without unnecessary filler."
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
     for ex in ds:
         instruction = ex.get("instruction", "").strip()
         inp = ex.get("input", "").strip()
         response = ex.get("output", "").strip()
         if not instruction or not response:
             continue
-        out.append({"prompt": build_sft_prompt(system, instruction, inp), "response": response})
+        out.append({"system": system, "instruction": instruction, "input": inp, "response": response})
     return out
 
 
@@ -53,18 +68,14 @@ def load_dolly(cache_dir: str) -> list[dict]:
     """databricks/databricks-dolly-15k human-written instructions."""
     ds = load_dataset("databricks/databricks-dolly-15k", split="train", cache_dir=cache_dir)
     out = []
-    system = (
-        "Below is an instruction that describes a task. When provided with an "
-        "input text or context, your response must be derived from it. Complete "
-        "the request appropriately, truthfully, and directly."
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
     for ex in ds:
         instruction = ex.get("instruction", "").strip()
         context = ex.get("context", "").strip()
         response = ex.get("response", "").strip()
         if not instruction or not response:
             continue
-        out.append({"prompt": build_sft_prompt(system, instruction, context), "response": response})
+        out.append({"system": system, "instruction": instruction, "input": context, "response": response})
     return out
 
 
@@ -76,11 +87,7 @@ def load_evol_instruct(cache_dir: str) -> list[dict]:
         cache_dir=cache_dir,
     )
     out = []
-    system = (
-        "You are a helpful AI Assistant. Below is an instruction that describes "
-        "a task. Write a detailed, accurate and concise response that "
-        "appropriately completes the request"
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
     for ex in ds:
         conversations = ex.get("conversations", [])
         if len(conversations) < 2:
@@ -95,7 +102,7 @@ def load_evol_instruct(cache_dir: str) -> list[dict]:
         response = gpt_turn.get("value", "").strip()
         if not instruction or not response:
             continue
-        out.append({"prompt": build_sft_prompt(system, instruction), "response": response})
+        out.append({"system": system, "instruction": instruction, "input": "", "response": response})
     return out
 
 
@@ -107,10 +114,7 @@ def load_everyday_conversations(cache_dir: str) -> list[dict]:
         cache_dir=cache_dir,
     )
     out = []
-    system = (
-        "You are an AI assistant who provides simple and easy to understand "
-        "answers to casual user queries"
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Casual-Query"])
     for ex in ds:
         messages = ex.get("messages", [])
         idx = 2
@@ -126,7 +130,7 @@ def load_everyday_conversations(cache_dir: str) -> list[dict]:
             continue
         if not user_content or not response:
             continue
-        out.append({"prompt": build_sft_prompt(system, user_content), "response": response})
+        out.append({"system": system, "instruction": user_content, "input": "", "response": response})
     return out
 
 
@@ -134,16 +138,13 @@ def load_gsm8k(cache_dir: str) -> list[dict]:
     """openai/gsm8k main train split."""
     ds = load_dataset("openai/gsm8k", "main", split="train", cache_dir=cache_dir)
     out = []
-    system = (
-        "You are an AI assistant who is an expert at solving math problems. "
-        "Solve the given math word problem step by step using the given instructions"
-    )
+    system = system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Math"])
     for ex in ds:
         question = ex.get("question", "").strip()
         answer = ex.get("answer", "").strip()
         if not question or not answer:
             continue
-        out.append({"prompt": build_sft_prompt(system, question), "response": answer})
+        out.append({"system": system, "instruction": question, "input": "", "response": answer})
     return out
 
 
@@ -155,16 +156,13 @@ def load_orca_math(cache_dir: str) -> list[dict]:
         cache_dir=cache_dir,
     )
     out = []
-    system = (
-        "You are an AI assistant who is an expert at solving math problems. "
-        "Solve the given math word problem step by step using the given instructions"
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Math"])
     for ex in ds:
         question = ex.get("question", "").strip()
         answer = ex.get("answer", "").strip()
         if not question or not answer:
             continue
-        out.append({"prompt": build_sft_prompt(system, question), "response": answer})
+        out.append({"system": system, "instruction": question, "input": "", "response": answer})
     return out
 
 
@@ -172,27 +170,10 @@ def load_code_python(cache_dir: str) -> list[dict]:
     """flytech/python-codes-25k."""
     ds = load_dataset("flytech/python-codes-25k", split="train", cache_dir=cache_dir)
     out = []
-    system = (
-        "You are an expert at Python programming. Provide a concise and accurate "
-        "solution to the following Python coding problem."
-    )
+    system = system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Code"])
     
     seen = set()
 
-    PYTHON_TASK_TEMPLATES = (
-    "Write Python code to complete the following task:\n\n{task}",
-    "Implement the following task in Python:\n\n{task}",
-    "Could you provide Python code for this task?\n\n{task}",
-    "Create a Python program that accomplishes this task:\n\n{task}",
-    "Solve the following task using Python code:\n\n{task}",
-    "Can you write a Python program for the following task?\n\n{task}",
-)
-
-    import hashlib
-    def add_python_intent(task: str) -> str:
-        digest = hashlib.sha256(task.encode("utf-8")).digest()
-        index = int.from_bytes(digest[:4], "big") % len(PYTHON_TASK_TEMPLATES)
-        return PYTHON_TASK_TEMPLATES[index].format(task=task)
     for ex in ds:
         raw_instruction = ex.get("instruction", "").strip()
         response = (ex.get("input", "").strip() + "\n" + ex.get("output", "").strip()).strip()
@@ -208,12 +189,7 @@ def load_code_python(cache_dir: str) -> list[dict]:
             continue
         seen.add(key)
         
-        instruction = add_python_intent(raw_instruction)
-
-        out.append({
-            "prompt": build_sft_prompt(system, instruction),
-            "response": response,
-        })
+        out.append({"system": system, "instruction": raw_instruction, "input": "", "response": response})
 
     return out
 
@@ -227,10 +203,7 @@ def load_smollm_basics(cache_dir: str) -> list[dict]:
     )
     p_hf = re.compile(r"Hugging\s*Face", re.IGNORECASE)
     p_smol = re.compile(r"SmolLM", re.IGNORECASE)
-    system = (
-        "You are a friendly assistant who responds with a casual yet short and "
-        "simple greet. If instructed, introduce yourself and respond about your identity"
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Greeting"])
     out = []
     for ex in ds:
         user_content = ex.get("instruction", "").strip()
@@ -239,7 +212,7 @@ def load_smollm_basics(cache_dir: str) -> list[dict]:
             continue
         user_content = p_smol.sub("customLM", p_hf.sub("unknownuser", user_content))
         asst_content = p_smol.sub("customLM", p_hf.sub("unknownuser", asst_content))
-        out.append({"prompt": build_sft_prompt(system, user_content), "response": asst_content})
+        out.append({"system": system, "instruction": user_content, "input": "", "response": asst_content})
     return out
 
 
@@ -250,11 +223,7 @@ def load_smoltalk_filtered(cache_dir: str) -> list[dict]:
         split="train",
         cache_dir=cache_dir,
     )
-    system = (
-        "You are an instruction-following creative AI Assistant. Below is an "
-        "instruction that describes a task. Write a response that appropriately "
-        "completes the request"
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
     out = []
     for ex in ds:
         messages = ex.get("messages", [])
@@ -263,7 +232,7 @@ def load_smoltalk_filtered(cache_dir: str) -> list[dict]:
         if messages[0].get("role") == "user" and messages[1].get("role") == "assistant":
             user_content = messages[0].get("content", "").strip()
             asst_content = messages[1].get("content", "").strip()
-            prompt = build_sft_prompt(system, user_content)
+            #prompt = build_sft_prompt(system, user_content)
         elif (
             len(messages) >= 3
             and messages[0].get("role") == "system"
@@ -272,14 +241,13 @@ def load_smoltalk_filtered(cache_dir: str) -> list[dict]:
         ):
             user_content = messages[1].get("content", "").strip()
             asst_content = messages[2].get("content", "").strip()
-            system_content = messages[0].get("content", "").strip()
-            system_prompt = f"{system}\n\n{system_content}" if system_content else system
-            prompt = build_sft_prompt(system_prompt, user_content)
+            #prompt = build_sft_prompt(system_prompt, user_content)
         else:
             continue
         if not user_content or not asst_content:
             continue
-        out.append({"prompt": prompt, "response": asst_content})
+        #out.append({"prompt": prompt, "response": asst_content})
+        out.append({"system": system, "instruction": user_content, "input": "", "response": asst_content})
     return out
 
 
@@ -298,10 +266,7 @@ def load_smoltalk_summarize_rewrite(cache_dir: str) -> list[dict]:
         cache_dir=cache_dir,
     )
     ds = concatenate_datasets([ds_rewrite, ds_summarize])
-    system = (
-        "You are a helpful assistant. Answer the user's request directly, "
-        "accurately, and concisely."
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Rewrite-summarize"])
     out = []
     for ex in ds:
         messages = ex.get("messages", [])
@@ -310,7 +275,9 @@ def load_smoltalk_summarize_rewrite(cache_dir: str) -> list[dict]:
         if messages[0].get("role") == "user" and messages[1].get("role") == "assistant":
             user_content = messages[0].get("content", "").strip()
             asst_content = messages[1].get("content", "").strip()
-            prompt = build_sft_prompt(system, user_content)
+            if not user_content or not asst_content:
+                continue
+            out.append({"system": system, "instruction": user_content, "input": "", "response": asst_content})
         elif (
             len(messages) >= 3
             and messages[0].get("role") == "system"
@@ -320,12 +287,11 @@ def load_smoltalk_summarize_rewrite(cache_dir: str) -> list[dict]:
             system_content = messages[0].get("content", "").strip()
             user_content = messages[1].get("content", "").strip()
             asst_content = messages[2].get("content", "").strip()
-            prompt = build_sft_prompt(system, system_content, user_content)
+            if not user_content or not asst_content:
+                continue
+            out.append({"system": system, "instruction": system_content, "input": user_content, "response": asst_content})
         else:
             continue
-        if not user_content or not asst_content:
-            continue
-        out.append({"prompt": prompt, "response": asst_content})
     return out
 
 
@@ -337,18 +303,14 @@ def load_eli5(cache_dir: str) -> list[dict]:
         split="train",
         cache_dir=cache_dir,
     )
-    system = (
-        "You are an assistant that explains complex topics in simple, clear "
-        "language for a curious non-expert. Keep the answer accurate, concrete, "
-        "and easy to follow."
-    )
+    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Casual-Query"])
     out = []
     for ex in ds:
         question = ex.get("question", "").strip()
         answer = ex.get("answer", "").strip()
         if not question or not answer:
             continue
-        out.append({"prompt": build_sft_prompt(system, question), "response": answer})
+        out.append({"system": system, "instruction": question, "input": "", "response": answer})
     return out
 
 

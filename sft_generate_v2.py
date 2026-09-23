@@ -75,7 +75,7 @@ import warnings
 import torch
 import torch.nn.functional as F
 import tiktoken
-from sft_prepare_v2 import DEFAULT_SYSTEM_PROMPT, build_prompt as build_sft_prompt
+from sft_prepare_v2 import NO_INPUT_TEMPLATE, WITH_INPUT_TEMPLATE
 from model_moe import MoETransformer
 
 warnings.filterwarnings("ignore")
@@ -84,6 +84,9 @@ warnings.filterwarnings("ignore")
 # The boundary string the model was trained to generate responses after.
 # Used to cleanly slice the response out of the full decoded sequence.
 RESPONSE_BOUNDARY = "### Response:\n"
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant. Answer the user's request directly, accurately, and concisely."
+)
 
 # ── GPT-2 multi-byte UTF-8 token sequence replacements ───────────────────────
 # Inherited from generate_moe.py — keeps curly quotes, dashes, ellipsis clean.
@@ -109,6 +112,14 @@ def replace_token_sequences(tokens: list) -> list:
         tokens = result
     return tokens
 
+def build_sft_prompt(system: str, instruction: str, input_text: str = "") -> str:
+    if input_text:
+        return WITH_INPUT_TEMPLATE.format(
+            system=system.strip(), instruction=instruction.strip(), input=input_text.strip()
+        )
+    return NO_INPUT_TEMPLATE.format(
+        system=system.strip(), instruction=instruction.strip()
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model loading
@@ -270,15 +281,16 @@ def generate_tokens(
 
     for _ in range(max_new_tokens):
         # Crop to the model's maximum context window
-        input_tokens = tokens[:, -block_size:]
-
+        #input_tokens = tokens[:, -block_size:]
+        if tokens.size(1) >= block_size:
+            break
         # MoETransformer returns (logits, aux_loss); aux_loss is ignored here
-        logits, _ = model(input_tokens)
+        logits, _ = model(tokens)
         logits = logits[:, -1, :]  # (1, vocab_size) — last position only
         
         # ── Repetition penalty ────────────────────────────────────────────────
         if repetition_penalty != 1.0:
-            for token_id in input_tokens[0].unique():
+            for token_id in tokens[0].unique():
                 if logits[0, token_id] > 0:
                     logits[0, token_id] /= repetition_penalty
                 else:

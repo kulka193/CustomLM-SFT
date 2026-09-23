@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse, json, math, os, random
+from collections import Counter
 
 import numpy as np
 import torch
@@ -18,54 +19,50 @@ IGNORE_INDEX = -100
 
 
 class IndexedSFTDataset(Dataset):
-    """One Dataset item == one complete SFT example."""
+    """In-memory index over inspectable JSONL SFT examples."""
     def __init__(self, data_dir, split):
-        self.tokens = np.memmap(os.path.join(data_dir, f"{split}_tokens.bin"),
-                                dtype=np.int32, mode="r")
-        self.labels = np.memmap(os.path.join(data_dir, f"{split}_labels.bin"),
-                                dtype=np.int32, mode="r")
-        self.offsets = np.load(os.path.join(data_dir, f"{split}_offsets.npy"),
-                               mmap_mode="r")
-        source_ids_path = os.path.join(data_dir, f"{split}_source_ids.npy")
-        self.source_ids = (
-            np.load(source_ids_path, mmap_mode="r")
-            if os.path.exists(source_ids_path) else None
-        )
-        if len(self.tokens) != len(self.labels):
-            raise ValueError("token/label file length mismatch")
-        if self.source_ids is not None and len(self.source_ids) != len(self.offsets):
-            raise ValueError("source-ID/offset file length mismatch")
+        path = os.path.join(data_dir, f"{split}_examples.jsonl")
+        self.examples = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    example = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid JSON in {path}:{line_number}") from exc
+
+                for field in ("prompt", "response", "source"):
+                    if not isinstance(example.get(field), str) or not example[field].strip():
+                        raise ValueError(
+                            f"{path}:{line_number} has an invalid {field!r} field"
+                        )
+                self.examples.append({
+                    "prompt": example["prompt"],
+                    "response": example["response"],
+                    "source": example["source"],
+                })
+
+        if not self.examples:
+            raise RuntimeError(f"No examples found in {path}")
+        self.sources = [example["source"] for example in self.examples]
+        self.source_counts = Counter(self.sources)
 
     def __len__(self):
-        return len(self.offsets)
+        return len(self.examples)
 
     def __getitem__(self, i):
-        start, end = map(int, self.offsets[i])
-        # copies avoid read-only memmap tensor issues
-        t = torch.from_numpy(np.asarray(self.tokens[start:end], dtype=np.int64).copy())
-        l = torch.from_numpy(np.asarray(self.labels[start:end], dtype=np.int64).copy())
-        return t, l
+        return self.examples[i]
 
 
-def build_source_sampler(dataset, data_config, metadata, seed):
+def build_source_sampler(dataset, data_config, seed):
     """Sample sources by configured percentage, then rows uniformly per source."""
     source_mix = data_config.get("source_mix_percent")
     if not source_mix:
         return None, {}
-    if dataset.source_ids is None:
-        raise RuntimeError(
-            "source_mix_percent requires prepared source IDs. Regenerate data with "
-            "sft_prepare_v2.py."
-        )
-
-    source_to_id = metadata.get("source_to_id")
-    if not source_to_id:
-        raise RuntimeError(
-            "metadata.json has no source_to_id mapping. Regenerate prepared data."
-        )
 
     configured_sources = set(source_mix)
-    prepared_sources = set(source_to_id)
+    prepared_sources = set(dataset.source_counts)
     missing = sorted(prepared_sources - configured_sources)
     if missing:
         raise ValueError(
@@ -92,30 +89,27 @@ def build_source_sampler(dataset, data_config, metadata, seed):
             f"source_mix_percent must sum to 100, got {total_percentage:g}"
         )
 
-    sample_weights = np.zeros(len(dataset), dtype=np.float64)
+    per_source_weight = {}
     expected_shares = {}
-    for source, source_id in source_to_id.items():
-        mask = np.asarray(dataset.source_ids == int(source_id))
-        count = int(mask.sum())
+    for source, count in dataset.source_counts.items():
         percentage = percentages[source]
         if percentage == 0:
             continue
-        if count == 0:
-            raise ValueError(
-                f"source_mix_percent gives {source!r} {percentage:g}%, but the "
-                "training split contains no rows for it"
-            )
         # WeightedRandomSampler assigns weight per row. Dividing a source's
         # probability mass equally across its rows makes the source-level draw
         # probability match the configured percentage.
-        sample_weights[mask] = (percentage / 100.0) / count
+        per_source_weight[source] = (percentage / 100.0) / count
         expected_shares[source] = percentage / 100.0
 
-    if not np.any(sample_weights > 0):
+    sample_weights = torch.tensor(
+        [per_source_weight.get(source, 0.0) for source in dataset.sources],
+        dtype=torch.double,
+    )
+    if not torch.any(sample_weights > 0):
         raise ValueError("source_mix_percent gives zero probability to all examples")
     generator = torch.Generator().manual_seed(seed)
     sampler = WeightedRandomSampler(
-        weights=torch.from_numpy(sample_weights),
+        weights=sample_weights,
         num_samples=len(dataset),
         replacement=True,
         generator=generator,
@@ -124,57 +118,90 @@ def build_source_sampler(dataset, data_config, metadata, seed):
 
 
 class SFTCollator:
-    """Causal shift + dynamic RIGHT padding.
+    """Tokenize complete JSONL examples, causally shift, and right-pad."""
 
-    Stored:
-      tokens = [prompt, prompt..., answer..., EOT]
-      labels = [-100,-100..., answer..., EOT]
-
-    Model training:
-      X = tokens[:-1]
-      Y = labels[1:]
-
-    Thus the logit after the last prompt token predicts the FIRST answer token.
-    """
-    def __init__(self, eot_token, max_seq_length, pad_to_multiple_of=8):
-        self.eot = int(eot_token)
+    def __init__(
+        self, encoding, max_seq_length, system_prompt_dropout=0.0,
+        pad_to_multiple_of=8
+    ):
+        if not 0.0 <= system_prompt_dropout <= 1.0:
+            raise ValueError("system_prompt_dropout must be between 0 and 1")
+        self.enc = encoding
+        self.eot = int(encoding.eot_token)
         self.max_seq = int(max_seq_length)
+        self.system_prompt_dropout = float(system_prompt_dropout)
         self.multiple = pad_to_multiple_of
+
+    @staticmethod
+    def remove_system_prompt(prompt: str) -> str:
+        system_header = "### SYSTEM:\n"
+        instruction_header = "\n\n### Instruction:\n"
+        if not prompt.startswith(system_header):
+            return prompt
+        marker = prompt.find(instruction_header, len(system_header))
+        if marker < 0:
+            return prompt
+        return "### Instruction:\n" + prompt[marker + len(instruction_header):]
 
     def __call__(self, examples):
         xs, ys = [], []
-        for tokens, semantic_labels in examples:
-            assert len(tokens) == len(semantic_labels)
-            if len(tokens) < 2:
+        for example in examples:
+            prompt = example["prompt"]
+            response = example["response"].strip()
+            if (
+                self.system_prompt_dropout > 0.0
+                and random.random() < self.system_prompt_dropout
+            ):
+                prompt = self.remove_system_prompt(prompt)
+
+            # Prevent tiktoken crash on unexpected special substrings
+            prompt_tokens = self.enc.encode_ordinary(prompt)
+            response_tokens = self.enc.encode_ordinary(response)
+            prompt_len = len(prompt_tokens)
+            if not response_tokens:
                 continue
-            x = tokens[:-1]
-            y = semantic_labels[1:]
-            if len(x) > self.max_seq - 1:
-                raise RuntimeError("prepared example exceeds max_seq_length")
-            if torch.any(y != IGNORE_INDEX):
-                xs.append(x)
-                ys.append(y)
+            full_text = prompt + response
+            full_tokens = self.enc.encode_ordinary(full_text)
+            # Check if the prefix matches exactly. If there's a BPE boundary merge
+            # at the junction, full_tokens[:prompt_len] won't match prompt_tokens
+            if full_tokens[:prompt_len] != prompt_tokens:
+                tokens = prompt_tokens + self.enc.encode_ordinary(response) + [self.eot]
+                labels = [IGNORE_INDEX] * prompt_len + tokens[prompt_len:]
+            else:
+                tokens = full_tokens + [self.eot]
+                labels = [IGNORE_INDEX] * prompt_len + full_tokens[prompt_len:] + [self.eot]
+            # Shift causally:
+            # X: predicts next token starting from the last prompt token
+            # Y: target label for next token
+            if len(tokens) > self.max_seq:
+                continue
+            xs.append(torch.tensor(tokens[:-1], dtype=torch.long))
+            ys.append(torch.tensor(labels[1:], dtype=torch.long))
 
         if not xs:
-            raise RuntimeError("batch has no supervised tokens")
+            raise RuntimeError(
+                "Batch has no usable examples; responses may be empty or exceed max_seq_length."
+            )
 
-        T = max(len(x) for x in xs)
+        max_len = max(len(x) for x in xs)
+        T = max_len
         if self.multiple:
             m = int(self.multiple)
-            T = min(self.max_seq - 1, ((T + m - 1) // m) * m)
+            T = ((max_len + m - 1) // m) * m
+            T = min(T, self.max_seq - 1)
 
-        # Your model has no padding attention mask. RIGHT padding is safe here:
-        # causal real-token positions cannot attend to future pad positions.
-        X = torch.full((len(xs), T), self.eot, dtype=torch.long)
-        Y = torch.full((len(xs), T), IGNORE_INDEX, dtype=torch.long)
-        valid_mask = torch.zeros((len(xs), T), dtype=torch.bool)
+        batch_size = len(xs)
+        X = torch.full((batch_size, T), self.eot, dtype=torch.long)
+        Y = torch.full((batch_size, T), IGNORE_INDEX, dtype=torch.long)
+        valid_mask = torch.zeros((batch_size, T), dtype=torch.bool)
+
         for i, (x, y) in enumerate(zip(xs, ys)):
-            n = len(x)
-            X[i, :n] = x
-            Y[i, :n] = y
+            # Safeguard slice length up to T
+            n = min(len(x), T)
+            X[i, :n] = x[:n]
+            Y[i, :n] = y[:n]
             valid_mask[i, :n] = True
         return {"input_ids": X, "labels": Y, "valid_mask": valid_mask}
-
 
 def build_model(cfg):
     m = cfg["model_config"]
@@ -293,27 +320,32 @@ def main(config_path, seed):
         )
 
     enc = tiktoken.get_encoding("gpt2")
-    collate = SFTCollator(enc.eot_token, dc["max_seq_length"], dc.get("pad_to_multiple_of", 8))
+    train_collate = SFTCollator(
+        enc, dc["max_seq_length"], system_prompt_dropout=0.10,
+        pad_to_multiple_of=dc.get("pad_to_multiple_of", 8)
+    )
+    val_collate = SFTCollator(
+        enc, dc["max_seq_length"], system_prompt_dropout=0.0,
+        pad_to_multiple_of=dc.get("pad_to_multiple_of", 8)
+    )
     train_ds = IndexedSFTDataset(dc["data_dir"], "train")
     val_ds = IndexedSFTDataset(dc["data_dir"], "val")
-    metadata = {}
-    if dc.get("source_mix_percent"):
-        metadata_path = os.path.join(dc["data_dir"], "metadata.json")
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
     train_sampler, expected_source_shares = build_source_sampler(
-        train_ds, dc, metadata, seed
+        train_ds, dc, seed
     )
+    num_workers = int(dc.get("num_workers", 2))
     train_loader = DataLoader(
         train_ds, batch_size=tc["batch_size"], sampler=train_sampler,
         shuffle=train_sampler is None,
-        num_workers=dc.get("num_workers", 2), pin_memory=True,
-        collate_fn=collate, drop_last=True
+        num_workers=num_workers, pin_memory=True,
+        collate_fn=train_collate, drop_last=True,
+        persistent_workers=num_workers > 0,
     )
     val_loader = DataLoader(
         val_ds, batch_size=tc.get("eval_batch_size", tc["batch_size"]), shuffle=False,
-        num_workers=dc.get("num_workers", 2), pin_memory=True,
-        collate_fn=collate, drop_last=False
+        num_workers=num_workers, pin_memory=True,
+        collate_fn=val_collate, drop_last=False,
+        persistent_workers=num_workers > 0,
     )
     if expected_source_shares:
         accelerator.print(

@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
-import argparse, json, os, random, re
-from collections import defaultdict
-
-import numpy as np
-import tiktoken
-from tqdm import tqdm
+import argparse, json, os, random
 
 # Reuse the HF dataset download and field parsing code.
 import sft_data_loader as legacy
 
 IGNORE_INDEX = -100
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful assistant. "
-    "Answer the user's request directly, accurately, and concisely."
-)
 
 NO_INPUT_TEMPLATE = (
     "### SYSTEM:\n{system}\n\n"
@@ -28,259 +19,136 @@ WITH_INPUT_TEMPLATE = (
     "### Response:\n"
 )
 
-
-def recover_semantic_fields(old_example: dict) -> dict | None:
-    """Remove the legacy dataset-specific SYSTEM prompt.
-
-    Your current loaders all emit the same Alpaca-ish structure, so we recover
-    only Instruction/Input and then rebuild the prompt with ONE system prompt.
-    """
-    prompt = old_example["prompt"]
-    response = old_example["response"].strip()
-    if not response:
-        return None
-
-    m = re.search(
-        r"### Instruction:\n(.*?)(?:\n\n### Input:\n(.*?))?\n\n### Response:\n\Z",
-        prompt,
-        flags=re.S,
-    )
-    if not m:
-        return None
-
-    instruction = (m.group(1) or "").strip()
-    input_text = (m.group(2) or "").strip()
-    if not instruction:
-        return None
-
-    return {
-        "instruction": instruction,
-        "input": input_text,
-        "response": response,
-    }
-
-
-def build_prompt(system: str, instruction: str, input_text: str = "") -> str:
+def build_sft_prompt(system: str, instruction: str, input_text: str = "") -> str:
+    system = system.strip()
+    instruction = instruction.strip()
+    input_text = input_text.strip()
     if input_text:
         return WITH_INPUT_TEMPLATE.format(
-            system=system.strip(), instruction=instruction.strip(), input=input_text.strip()
+            system=system,
+            instruction=instruction,
+            input=input_text,
         )
-    return NO_INPUT_TEMPLATE.format(
-        system=system.strip(), instruction=instruction.strip()
-    )
+    return NO_INPUT_TEMPLATE.format(system=system, instruction=instruction)
 
-
-def encode_example(record, enc, system_prompt, max_seq_length, long_policy="skip"):
-    """Encode one whole example. Never truncate away the instruction.
-
-    Default policy is 'skip'. Optional 'truncate_input' trims ONLY the separate
-    context/Input field; the system prompt, full instruction, Response boundary,
-    full answer, and EOT are always preserved.
-    """
-    instruction = record["instruction"].strip()
-    input_text = record.get("input", "").strip()
-    response = record["response"].strip()
-
-    response_tokens = enc.encode_ordinary(response)
-    eot = [enc.eot_token]
-    if not response_tokens:
-        return None
-
-    prompt = build_prompt(system_prompt, instruction, input_text)
-    prompt_tokens = enc.encode_ordinary(prompt)
-
-    if len(prompt_tokens) + len(response_tokens) + 1 > max_seq_length:
-        if long_policy != "truncate_input" or not input_text:
-            return None
-
-        # Rebuild token-wise so ONLY Input is shortened.
-        prefix = (
-            f"### SYSTEM:\n{system_prompt.strip()}\n\n"
-            f"### Instruction:\n{instruction}\n\n"
-            "### Input:\n"
-        )
-        suffix = "\n\n### Response:\n"
-        prefix_t = enc.encode_ordinary(prefix)
-        suffix_t = enc.encode_ordinary(suffix)
-        input_t = enc.encode_ordinary(input_text)
-
-        input_budget = (
-            max_seq_length
-            - len(prefix_t)
-            - len(suffix_t)
-            - len(response_tokens)
-            - 1
-        )
-        if input_budget < 0:
-            return None  # full instruction + full response cannot fit
-
-        input_t = input_t[:input_budget]
-        prompt_tokens = prefix_t + input_t + suffix_t
-        prompt = enc.decode(prompt_tokens)
-
-    tokens = prompt_tokens + response_tokens + eot
-    labels = [IGNORE_INDEX] * len(prompt_tokens) + response_tokens + eot
-
-    assert len(tokens) == len(labels)
-    assert len(tokens) <= max_seq_length
-    return tokens, labels, prompt
-
-
-def write_split(
-    name, records, data_dir, enc, system_prompt, max_seq, long_policy,
-    source_to_id
-):
-    encoded = []
-    human = []
-    skipped = 0
-    by_source = defaultdict(lambda: {"kept": 0, "skipped": 0, "supervised_tokens": 0})
-
-    for r in tqdm(records, desc=f"Encoding {name}"):
-        item = encode_example(r, enc, system_prompt, max_seq, long_policy)
-        src = r["source"]
-        if item is None:
-            skipped += 1
-            by_source[src]["skipped"] += 1
-            continue
-        tokens, labels, prompt = item
-        encoded.append((tokens, labels, source_to_id[src]))
-        by_source[src]["kept"] += 1
-        by_source[src]["supervised_tokens"] += sum(x != IGNORE_INDEX for x in labels)
-        if name == "val":
-            human.append({"prompt": prompt, "response": r["response"], "source": src})
-
-    if not encoded:
-        raise RuntimeError(f"No usable examples in {name} split")
-
-    total = sum(len(t) for t, _, _ in encoded)
-    offsets = np.empty((len(encoded), 2), dtype=np.int64)
-    source_ids = np.empty(len(encoded), dtype=np.int16)
-    tok = np.memmap(os.path.join(data_dir, f"{name}_tokens.bin"), dtype=np.int32,
-                    mode="w+", shape=(total,))
-    lab = np.memmap(os.path.join(data_dir, f"{name}_labels.bin"), dtype=np.int32,
-                    mode="w+", shape=(total,))
-
-    cursor = 0
-    supervised = 0
-    for i, (tokens, labels, source_id) in enumerate(encoded):
-        end = cursor + len(tokens)
-        tok[cursor:end] = np.asarray(tokens, dtype=np.int32)
-        lab[cursor:end] = np.asarray(labels, dtype=np.int32)
-        offsets[i] = (cursor, end)
-        source_ids[i] = source_id
-        supervised += sum(x != IGNORE_INDEX for x in labels)
-        cursor = end
-    tok.flush(); lab.flush()
-    np.save(os.path.join(data_dir, f"{name}_offsets.npy"), offsets)
-    np.save(os.path.join(data_dir, f"{name}_source_ids.npy"), source_ids)
-
-    if name == "val":
-        with open(os.path.join(data_dir, "val_examples.jsonl"), "w", encoding="utf-8") as f:
-            for x in human:
-                f.write(json.dumps(x, ensure_ascii=False) + "\n")
-
-    lens = offsets[:, 1] - offsets[:, 0]
-    return {
-        "examples": len(encoded), "skipped": skipped, "tokens": int(total),
-        "supervised_tokens": int(supervised), "mean_length": float(lens.mean()),
-        "max_length": int(lens.max()), "by_source": dict(by_source),
-    }
+def write_jsonl(path, examples):
+    with open(path, "w", encoding="utf-8") as f:
+        for example in examples:
+            f.write(json.dumps(example, ensure_ascii=False) + "\n")
 
 
 def prepare(config_path, seed):
-    random.seed(seed); np.random.seed(seed)
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
     dc = cfg["data_config"]
     data_dir = dc["data_dir"]
     os.makedirs(data_dir, exist_ok=True)
-    cache_dir = os.path.join(data_dir, "hf_cache")
+    if os.name == "nt":
+        # Some dataset-generated Arrow names exceed MAX_PATH under the repo.
+        cache_dir = os.path.join(os.path.expanduser("~"), ".sft_hf_cache")
+    else:
+        cache_dir = os.path.join(data_dir, "hf_cache")
     os.makedirs(cache_dir, exist_ok=True)
 
-    system_prompt = dc.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
-    long_policy = dc.get("long_example_policy", "skip")
-    if long_policy not in {"skip", "truncate_input"}:
-        raise ValueError("long_example_policy must be 'skip' or 'truncate_input'")
-
     val_split = float(dc.get("val_split", 0.02))
-    enc = tiktoken.get_encoding("gpt2")
-    train_records, val_records = [], []
-    source_selection = {}
-    active_sources = [
-        name for name, requested_train in dc["dataset_mix"].items()
-        if requested_train > 0
-    ]
-    source_to_id = {
-        name: source_id for source_id, name in enumerate(active_sources)
-    }
+    if not 0.0 < val_split < 1.0:
+        raise ValueError("val_split must be between 0 and 1")
 
-    for k, (name, requested_train) in enumerate(dc["dataset_mix"].items()):
+    train_examples = []
+    val_examples = []
+    source_counts = {}
+
+    for index, (source, requested_train) in enumerate(dc["dataset_mix"].items()):
+        requested_train = int(requested_train)
         if requested_train <= 0:
             continue
-        loader = legacy.DATASET_LOADERS.get(name)
+
+        loader = legacy.DATASET_LOADERS.get(source)
         if loader is None:
-            print(f"[WARN] unknown dataset {name}; skipping")
-            continue
+            raise ValueError(f"No dataset loader registered for {source!r}")
 
-        print(f"Loading {name} ...")
-        old_examples = loader(cache_dir)
-        records = []
-        for ex in old_examples:
-            r = recover_semantic_fields(ex)
-            if r:
-                records.append(r)
+        print(f"Loading {source} ...")
+        loaded = loader(cache_dir)
+        examples = []
+        skipped = 0
+        duplicates = 0
+        seen = set()
+        for example in loaded:
+            system = example.get("system", "")
+            instruction = example.get("instruction", "")
+            input_text = example.get("input", "")
+            response = example.get("response", "")
+            if not all(
+                isinstance(value, str)
+                for value in (system, instruction, input_text, response)
+            ):
+                skipped += 1
+                continue
 
-        rng = random.Random(seed + 1009 * (k + 1))
-        rng.shuffle(records)
-        n_train = min(int(requested_train), len(records))
-        desired_val = max(1, round(n_train * val_split / max(1.0 - val_split, 1e-8)))
-        n_val = min(desired_val, max(0, len(records) - n_train))
+            system = system.strip()
+            instruction = instruction.strip()
+            input_text = input_text.strip()
+            response = response.strip()
+            if not system or not instruction or not response:
+                skipped += 1
+                continue
 
-        tr = records[:n_train]
-        va = records[n_train:n_train + n_val]
-        for r in tr:
-            r["source"] = name
-        for r in va:
-            r["source"] = name
-        train_records.extend(tr)
-        val_records.extend(va)
-        source_selection[name] = {
-            "available": len(records), "train": len(tr), "val": len(va)
+            prompt = build_sft_prompt(system, instruction, input_text)
+            key = (prompt, response)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            examples.append({
+                "prompt": prompt,
+                "response": response,
+                "source": source,
+            })
+
+        rng = random.Random(seed + 1009 * (index + 1))
+        rng.shuffle(examples)
+        target_train = min(requested_train, len(examples))
+        desired_val = max(1, round(target_train * val_split / (1.0 - val_split)))
+        if len(examples) >= 2:
+            n_val = min(desired_val, len(examples) - 1)
+            n_train = min(requested_train, len(examples) - n_val)
+        else:
+            n_train = target_train
+            n_val = 0
+
+        train_examples.extend(examples[:n_train])
+        val_examples.extend(examples[n_train:n_train + n_val])
+        source_counts[source] = {
+            "available": len(examples),
+            "train": n_train,
+            "val": n_val,
+            "skipped": skipped,
+            "duplicates": duplicates,
         }
-        print(f"  available={len(records):,}, train={len(tr):,}, val={len(va):,}")
+        print(
+            f"  available={len(examples):,}, train={n_train:,}, "
+            f"val={n_val:,}, skipped={skipped:,}, duplicates={duplicates:,}"
+        )
 
-    random.Random(seed).shuffle(train_records)
-    random.Random(seed + 1).shuffle(val_records)
+    if not train_examples:
+        raise RuntimeError("No training examples were prepared")
+    if not val_examples:
+        raise RuntimeError(
+            "No validation examples were prepared; reduce requested dataset sizes"
+        )
 
-    if not val_records:
-        # Only a fallback. Prefer requesting fewer train examples so validation is disjoint.
-        val_records = [dict(x) for x in train_records[-min(256, len(train_records)):]]
-        val_disjoint = False
-        print("[WARN] validation fallback overlaps training")
-    else:
-        val_disjoint = True
+    random.Random(seed).shuffle(train_examples)
+    random.Random(seed + 1).shuffle(val_examples)
 
-    train_stats = write_split(
-        "train", train_records, data_dir, enc, system_prompt,
-        int(dc["max_seq_length"]), long_policy, source_to_id
-    )
-    val_stats = write_split(
-        "val", val_records, data_dir, enc, system_prompt,
-        int(dc["max_seq_length"]), long_policy, source_to_id
-    )
+    train_path = os.path.join(data_dir, "train_examples.jsonl")
+    val_path = os.path.join(data_dir, "val_examples.jsonl")
+    write_jsonl(train_path, train_examples)
+    write_jsonl(val_path, val_examples)
 
-    metadata = {
-        "seed": seed, "tokenizer": "gpt2", "eot_token": enc.eot_token,
-        "ignore_index": IGNORE_INDEX, "system_prompt": system_prompt,
-        "long_example_policy": long_policy, "val_is_disjoint": val_disjoint,
-        "source_selection": source_selection, "source_to_id": source_to_id,
-        "train": train_stats, "val": val_stats, "config_snapshot": cfg,
-    }
-    with open(os.path.join(data_dir, "metadata.json"), "w") as f:
-        json.dump(metadata, f, indent=2)
-
-    print(json.dumps({"train": train_stats, "val": val_stats}, indent=2))
+    print(f"Wrote {len(train_examples):,} examples to {train_path}")
+    print(f"Wrote {len(val_examples):,} examples to {val_path}")
+    print(json.dumps(source_counts, indent=2))
 
 
 if __name__ == "__main__":

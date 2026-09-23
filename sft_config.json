@@ -13,10 +13,10 @@
         "batch_size": 8,
         "gradient_accumulation_steps": 4,
         "max_iters": 75000,
-        "max_sup_tokens": 150000000,
+        "max_sup_tokens": 60000000,
         "eval_iters": 100,
-        "log_interval": 2000,
-        "save_interval": 5000,
+        "log_interval": 1000,
+        "save_interval": 1000,
         "lr": 5e-6,
         "min_lr": 1e-6,
         "warmup_iters": 500,
@@ -29,8 +29,6 @@
     "data_config": {
         "data_dir": "./sft_data",
         "max_seq_length": 2048,
-        "prompt_mask_fraction": 0.65,
-        "train_split": 0.98,
         "val_split": 0.02,
         "dataset_mix": {
             "alpaca":                   0,
@@ -57,12 +55,10 @@
             "smoltalk_10k":              10,
             "smoltalk_summarize_rewrite":15,
             "eli5":                     10
-        },
-        "n_eval_examples_per_dataset": 25,
-        "prompt_template": "alpaca"
+        }
     },
     "checkpoint_config": {
-        "base_model_path": "./model_ckpt_0906/ckpt_dist_bf16_1375000.pt",
+        "base_model_path": "./pt_model/ckpt_dist_bf16_1375000.pt",
         "output_dir": "./sft_checkpoints",
         "resume_from": null
     },
