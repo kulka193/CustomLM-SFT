@@ -11,7 +11,7 @@ SYSTEM_PROMPT_TEMPLATE = {
     "General": [
         "You are a helpful assistant. Answer directly and accurately.",
         "You are a helpful assistant who answers general questions. Respond to the user's request directly, accurately, and concisely.",
-        "Provide a concise, relevant, and factual response to the user's request.",
+        "Provide a general and factual response to the user's request.",
         "Give an accurate and useful answer without unnecessary filler or unrelated details.",
     ],
     "Math": [
@@ -28,22 +28,28 @@ SYSTEM_PROMPT_TEMPLATE = {
     ],
     "Rewrite-summarize": [
         "You are a helpful writing assistant. Follow the requested transformation faithfully and concisely.",
-        "Follow the requested writing task carefully and produce a clear, concise, and faithful result.",
+        "Follow the requested writing or summarization instructions carefully and produce a clear, concise, and faithful result.",
         "Rewrite or summarize the provided content as requested, keeping the important information accurate.",
-        "Perform the requested text transformation while preserving relevant details and avoiding unnecessary additions.",
+        "Perform the requested text transformation by following instructions carefully.",
     ],
     "Casual-Query": [
-        "You are an AI assistant who provides simple and easy to understand answers to casual user queries",
-        "Explain the topic in easy-to-understand language like I am five",
-        "Describe the concept in a simple and intuitive way, using examples only when they improve understanding.",
+        "You are an AI assistant who provides simple and easy to understand answers to casual user queries.",
+        "Explain the topic in an easy-to-understand language like I am five.",
+        "Describe the concept in a simple language using examples only when they improve understanding.",
         "Provide a clear beginner-friendly explanation without unnecessary technical complexity.",
     ],
     "Greeting": [
-        "You are a friendly assistant. Greet the user politely and identify yourself",
-        "Respond to the user with your identity and greet the user"
-        "Say hello to the user in a friendly greeting and keep it concise and relevant to the user's query",
-        "Briefly introduce yourself and greet the user casually",
+        "You are a friendly assistant. Greet the user politely and identify yourself.",
+        "Respond to the user with your identity and greet the user.",
+        "Say hello to the user in a friendly greeting and keep it concise and relevant to the user's query.",
+        "Briefly introduce yourself and greet the user casually.",
     ],
+    "Instruct": [
+        "You are a helpful instruction-following assistant. Complete the user's request accurately, directly, and concisely.",
+        "Follow the user's instructions carefully and provide a relevant, accurate response without unnecessary information.",
+        "Complete the requested task accurately, focusing on the user's stated requirements and constraints.",
+        "Respond to the instruction precisely and helpfully. Stay on task and avoid unrelated details.",
+    ]
 }
 
 
@@ -53,8 +59,8 @@ def load_alpaca(cache_dir: str) -> list[dict]:
     """tatsu-lab/alpaca single-turn instruction examples."""
     ds = load_dataset("tatsu-lab/alpaca", split="train", cache_dir=cache_dir)
     out = []
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
         instruction = ex.get("instruction", "").strip()
         inp = ex.get("input", "").strip()
         response = ex.get("output", "").strip()
@@ -68,8 +74,8 @@ def load_dolly(cache_dir: str) -> list[dict]:
     """databricks/databricks-dolly-15k human-written instructions."""
     ds = load_dataset("databricks/databricks-dolly-15k", split="train", cache_dir=cache_dir)
     out = []
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
         instruction = ex.get("instruction", "").strip()
         context = ex.get("context", "").strip()
         response = ex.get("response", "").strip()
@@ -87,8 +93,8 @@ def load_evol_instruct(cache_dir: str) -> list[dict]:
         cache_dir=cache_dir,
     )
     out = []
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Instruct"])
         conversations = ex.get("conversations", [])
         if len(conversations) < 2:
             continue
@@ -114,8 +120,8 @@ def load_everyday_conversations(cache_dir: str) -> list[dict]:
         cache_dir=cache_dir,
     )
     out = []
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Casual-Query"])
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Casual-Query"])
         messages = ex.get("messages", [])
         idx = 2
         if len(messages) <= idx + 1:
@@ -138,8 +144,8 @@ def load_gsm8k(cache_dir: str) -> list[dict]:
     """openai/gsm8k main train split."""
     ds = load_dataset("openai/gsm8k", "main", split="train", cache_dir=cache_dir)
     out = []
-    system = system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Math"])
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Math"])
         question = ex.get("question", "").strip()
         answer = ex.get("answer", "").strip()
         if not question or not answer:
@@ -156,8 +162,8 @@ def load_orca_math(cache_dir: str) -> list[dict]:
         cache_dir=cache_dir,
     )
     out = []
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Math"])
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Math"])
         question = ex.get("question", "").strip()
         answer = ex.get("answer", "").strip()
         if not question or not answer:
@@ -169,12 +175,10 @@ def load_orca_math(cache_dir: str) -> list[dict]:
 def load_code_python(cache_dir: str) -> list[dict]:
     """flytech/python-codes-25k."""
     ds = load_dataset("flytech/python-codes-25k", split="train", cache_dir=cache_dir)
-    out = []
-    system = system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Code"])
-    
+    out = []    
     seen = set()
-
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Code"])
         raw_instruction = ex.get("instruction", "").strip()
         response = (ex.get("input", "").strip() + "\n" + ex.get("output", "").strip()).strip()
 
@@ -203,9 +207,9 @@ def load_smollm_basics(cache_dir: str) -> list[dict]:
     )
     p_hf = re.compile(r"Hugging\s*Face", re.IGNORECASE)
     p_smol = re.compile(r"SmolLM", re.IGNORECASE)
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Greeting"])
     out = []
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Greeting"])
         user_content = ex.get("instruction", "").strip()
         asst_content = ex.get("response", "").strip()
         if not user_content or not asst_content:
@@ -223,16 +227,15 @@ def load_smoltalk_filtered(cache_dir: str) -> list[dict]:
         split="train",
         cache_dir=cache_dir,
     )
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
     out = []
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["General"])
         messages = ex.get("messages", [])
         if len(messages) < 2:
             continue
         if messages[0].get("role") == "user" and messages[1].get("role") == "assistant":
             user_content = messages[0].get("content", "").strip()
             asst_content = messages[1].get("content", "").strip()
-            #prompt = build_sft_prompt(system, user_content)
         elif (
             len(messages) >= 3
             and messages[0].get("role") == "system"
@@ -241,12 +244,10 @@ def load_smoltalk_filtered(cache_dir: str) -> list[dict]:
         ):
             user_content = messages[1].get("content", "").strip()
             asst_content = messages[2].get("content", "").strip()
-            #prompt = build_sft_prompt(system_prompt, user_content)
         else:
             continue
         if not user_content or not asst_content:
             continue
-        #out.append({"prompt": prompt, "response": asst_content})
         out.append({"system": system, "instruction": user_content, "input": "", "response": asst_content})
     return out
 
@@ -266,9 +267,9 @@ def load_smoltalk_summarize_rewrite(cache_dir: str) -> list[dict]:
         cache_dir=cache_dir,
     )
     ds = concatenate_datasets([ds_rewrite, ds_summarize])
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Rewrite-summarize"])
     out = []
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Rewrite-summarize"])
         messages = ex.get("messages", [])
         if len(messages) < 2:
             continue
@@ -303,9 +304,9 @@ def load_eli5(cache_dir: str) -> list[dict]:
         split="train",
         cache_dir=cache_dir,
     )
-    system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Casual-Query"])
     out = []
     for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Casual-Query"])
         question = ex.get("question", "").strip()
         answer = ex.get("answer", "").strip()
         if not question or not answer:
