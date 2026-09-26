@@ -369,7 +369,7 @@ def load_basic_arith(cache_dir: str) -> list[dict]:
             continue
         system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Basic-Arithmetic"])
         question = ex.get("question", "").strip()
-        answer = str(int(ex.get("answer", "").strip()))
+        answer = str(int(ex.get("answer", ""))).strip()
         if not question or not answer:
             continue
         op = ex.get("op")
