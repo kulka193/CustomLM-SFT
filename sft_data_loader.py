@@ -346,7 +346,7 @@ def load_commonsense(cache_dir: str) -> list[dict]:
         for i in range(len(choices_dict["label"])):
             context = context + f"({choices_dict["label"][i]}) {choices_dict["text"][i]} \n" 
             if answer_key == choices_dict["label"][i].strip():
-                answer = f"The answer is ({choices_dict["label"][i]}) {choices_dict["text"]}"
+                answer = f"The answer is ({choices_dict["label"][i]}) {choices_dict["text"][i]}"
         if not question or not answer:
             continue
         out.append({"system": system, "instruction": question, "input": context, "response": answer})
