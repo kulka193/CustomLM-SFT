@@ -324,7 +324,7 @@ def load_eli5(cache_dir: str) -> list[dict]:
         out.append({"system": system, "instruction": question, "input": "", "response": answer})
     return out
 
-def load_commonsense(cache_dir: str) -> list(dict):
+def load_commonsense(cache_dir: str) -> list[dict]:
     ds1 = load_dataset(
         "tau/commonsense_qa",
         split="train",
@@ -352,7 +352,7 @@ def load_commonsense(cache_dir: str) -> list(dict):
         out.append({"system": system, "instruction": question, "input": context, "response": answer})
     return out
 
-def load_basic_arith(cache_dir: str) -> list(dict):
+def load_basic_arith(cache_dir: str) -> list[dict]:
     """
     ChrisMcCormick/basic-arithmetic
     """
