@@ -373,7 +373,8 @@ def load_basic_arith(cache_dir: str) -> list[dict]:
         if not question or not answer:
             continue
         op = ex.get("op")
-        a = ex.get("a"); b = ex.get("op")
+        a = ex.get("a") 
+        b = ex.get("b")
         expression = f"{a}{op}{b}"
         instruction = (
             f"{question}\n{expression}"
