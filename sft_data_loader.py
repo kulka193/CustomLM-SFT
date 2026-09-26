@@ -332,7 +332,7 @@ def load_commonsense(cache_dir: str) -> list[dict]:
     )
     ds2 = load_dataset("allenai/ai2_arc",
                         "ARC-Easy",
-                        "train",
+                        split="train",
                         cache_dir=cache_dir)
     out = []
     ds = concatenate_datasets([ds1, ds2])
