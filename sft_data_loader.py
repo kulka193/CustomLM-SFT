@@ -343,7 +343,7 @@ def load_commonsense(cache_dir: str) -> list[dict]:
         choices_dict = ex.get("choices", {})
         context = ""
         assert isinstance(choices_dict["label"], list) and isinstance(choices_dict["text"], list)
-        for i in range(choices_dict["label"]):
+        for i in range(len(choices_dict["label"])):
             context = context + f"({choices_dict["label"][i]}) {choices_dict["text"][i]} \n" 
             if answer_key == choices_dict["label"][i].strip():
                 answer = f"The answer is ({choices_dict["label"][i]}) {choices_dict["text"]}"
