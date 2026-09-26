@@ -49,6 +49,16 @@ SYSTEM_PROMPT_TEMPLATE = {
         "Follow the user's instructions carefully and provide a relevant, accurate response without unnecessary information.",
         "Complete the requested task accurately, focusing on the user's stated requirements and constraints.",
         "Respond to the instruction precisely and helpfully. Stay on task and avoid unrelated details.",
+    ],
+    "CommonSense": [
+        "You are a practical assistant that answers using practical real-world reasoning from the given choices. Avoid exaggerated conclusions.",
+        "You are given a few options to choose the answer from. Use everyday knowledge and common sense to pick the right choice the user's question realistically.",
+        "Provide the most reasonable answer based on common sense and everyday experience and pick the correct choice."
+    ],
+    "Basic-Arithmetic": [
+        "Solve the arithmetic problem and provide the correct result.",
+        "Perform basic math operation carefully and return the correct numerical answer.",
+        "Solve basic arithmetic question correctly and keep response and explanation short."
     ]
 }
 
@@ -314,6 +324,65 @@ def load_eli5(cache_dir: str) -> list[dict]:
         out.append({"system": system, "instruction": question, "input": "", "response": answer})
     return out
 
+def load_commonsense(cache_dir: str) -> list(dict):
+    ds1 = load_dataset(
+        "tau/commonsense_qa",
+        split="train",
+        cache_dir=cache_dir,
+    )
+    ds2 = load_dataset("allenai/ai2_arc",
+                        "ARC-Easy",
+                        "train",
+                        cache_dir=cache_dir)
+    out = []
+    ds = concatenate_datasets([ds1, ds2])
+    for ex in ds:
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["CommonSense"])
+        question = ex.get("question", "").strip()
+        answer_key = ex.get("answerKey", "").strip()
+        choices_dict = ex.get("choices", {})
+        context = ""
+        assert isinstance(choices_dict["label"], list) and isinstance(choices_dict["text"], list)
+        for i in range(choices_dict["label"]):
+            context = context + f"({choices_dict["label"][i]}) {choices_dict["text"][i]} \n" 
+            if answer_key == choices_dict["label"][i].strip():
+                answer = f"The answer is ({choices_dict["label"][i]}) {choices_dict["text"]}"
+        if not question or not answer:
+            continue
+        out.append({"system": system, "instruction": question, "input": context, "response": answer})
+    return out
+
+def load_basic_arith(cache_dir: str) -> list(dict):
+    """
+    ChrisMcCormick/basic-arithmetic
+    """
+    ds = load_dataset(
+        "ChrisMcCormick/basic-arithmetic",
+        "default",
+        split="train",
+        cache_dir=cache_dir,
+    )
+    out = []
+
+    for ex in ds:
+        if ex.get("difficulty").strip() not in ("easy", "medium_easy", "medium_hard"):
+            continue
+        system = rng.choice(SYSTEM_PROMPT_TEMPLATE["Basic-Arithmetic"])
+        question = ex.get("question", "").strip()
+        answer = str(int(ex.get("answer", "").strip()))
+        if not question or not answer:
+            continue
+        op = ex.get("op")
+        a = ex.get("a"); b = ex.get("op")
+        expression = f"{a}{op}{b}"
+        instruction = (
+            f"{question}\n{expression}"
+        )
+        response = (
+            f"{expression} = <<{expression}={answer}>>{answer}"
+        )
+        out.append({"system": system, "instruction": instruction, "input": "", "response": response})
+    return out
 
 DATASET_LOADERS = {
     "alpaca": load_alpaca,
@@ -327,4 +396,6 @@ DATASET_LOADERS = {
     "smoltalk_10k": load_smoltalk_filtered,
     "smoltalk_summarize_rewrite": load_smoltalk_summarize_rewrite,
     "eli5": load_eli5,
+    "commonsense": load_commonsense,
+    "basic_arith": load_basic_arith
 }
